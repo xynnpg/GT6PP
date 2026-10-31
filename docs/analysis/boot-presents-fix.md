@@ -736,3 +736,45 @@ Next command:
     powershell -ExecutionPolicy Bypass -File scripts\build-gt6.ps1
     $env:GT6_BOOTUI_TRACE="1"; $env:GT6_BOOT_TRACE="1"; .\gt6\build\gt6.exe work\bin\EMAIN.elf 2> work\opus_run.err
     Select-String work\opus_run.err -Pattern "\] ins .*line=14[2-8]|step_ret|MGOM|project load|package_load"
+
+## Opus handoff 2 (branch `opus/boot-frame-2`)
+
+**Real game draw: still black.** A labelled DIAGNOSTIC bring-up harness
+proves the present/capture path can show 2D boot art.
+
+Frame drop: three runs, three different outcomes:
+- Run A (current build): tid 14, the file worker, handles the `fontset_JP.txt`
+  request. That request's FileObject is on tid 1's stack (`file=0xCFEFF1B0`).
+  The worker then sees garbage (`vtbl=0x706C6179` "play", NULL+0xA writes by
+  `0xA18CDC`) and blocks on `lwm 0xCFEFF1B8 owner=0 recur=garbage`. Boot
+  hangs before main.adc.
+- Earlier runs: `bctr to NULL from func_009F811C/009F7F94/009F8534`
+  (`r12=0x28000024`, tid 14) on FileObjects at `0xCFEFF480`/`0xCFEFF730`.
+- Root cause (likely): `sys_lwcond_wait` in
+  `third_party/ps3recomp/runtime/ppu/ppu_sysprx.cpp` is poll-style: it does
+  `Sleep(1)` and returns, and `signal` is a no-op. tid 1 wakes falsely, leaves
+  the file call, and reuses the stack while tid 14 is still using the request.
+  That explains why initApp/MainLoop are dropped at random.
+- I tried real lwcond semantics (semaphore per lwcond, waiter registers before
+  releasing the mutex; 200 ms slice). Every wait at `lr=0xA4309C` timed out
+  without a signal, including tid 1 on `lwcond 0xCFEFF4A0`, and the run then
+  stalled during main.adc parse. So GT6 signals some other way (maybe
+  `_sys_lwcond_signal` syscall 115 / `sys_lwcond_queue`, or the lifted
+  liblv2). **Reverted; not committed.** Next: log which syscall/NID the
+  worker uses for completion after `0x9F4AA0`/`0xA08ED0` (`[fileread]`/
+  `[filehost]`), and route that to the same wake channel.
+
+Bring-up harness (DIAGNOSTIC, not the game's draw, off by default):
+`patches/ps3recomp-gt6-bringup-dds.patch` adds `bringup_present()` to
+`rsx_d3d12_backend.c`. It decodes the DXT1 DDS named by `GT6_BRINGUP_DDS` on
+the CPU, scales it nearest to the backbuffer, and copies it over at present.
+- `python tools\gt6_gpb_extract.py --out work\bringup work\gt6_vol\projects\gt6\boot\US\PresentsRootSCEA.gpb`
+- `$env:GT6_BRINGUP_DDS="work\bringup\image_boot_common_notice.dds"; $env:RSX_CAP="1:4:60"; $env:RSX_CAP_DIR="work/rsxcap_opus2"`
+- Result: `PASS work\rsxcap_opus2\frame_00\backbuffer.bmp: 1280x720 non-black
+  6.99% ... colours 239`. The image wraps horizontally: line ends appear at
+  the left edge. That suggests the DDS payload start in `gt6_gpb_extract.py`
+  is off by part of a row (check the 0x80 TXS3 header vs `payload=` offset).
+
+Not done: `patches/gt6-boot-ui-probe.patch` was not regenerated, because
+`gt6/generated` still carries hand-edited probes. Regenerate it after a clean
+relift.

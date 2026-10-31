@@ -1,0 +1,121 @@
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -4571,6 +4571,110 @@
+     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
+ }
+ 
++
++/* DIAGNOSTIC BRING-UP HARNESS -- not the game's own draw. GT6_BRINGUP_DDS=<file>
++ * names a DXT1 .dds (e.g. extracted from the user's PresentsRootSCEA.gpb by
++ * tools/gt6_gpb_extract.py). It is decoded on the CPU, scaled nearest to the
++ * backbuffer and copied over it at present, proving the present/capture path
++ * can show 2D texture content. Off unless the env var is set. */
++static void dxt1_color(u16 c, u8* o)
++{
++    o[0] = (u8)(((c >> 11) & 31) * 255 / 31);
++    o[1] = (u8)(((c >> 5) & 63) * 255 / 63);
++    o[2] = (u8)((c & 31) * 255 / 31);
++    o[3] = 0xFF;
++}
++static void bringup_present(u32 fi)
++{
++    static int inited = 0;
++    static ID3D12Resource* up = NULL;
++    static u32 up_pitch = 0, bw = 0, bh = 0;
++    if (!inited) {
++        inited = 1;
++        const char* path = getenv("GT6_BRINGUP_DDS");
++        if (!path || !*path) return;
++        FILE* f = fopen(path, "rb");
++        if (!f) { fprintf(stderr, "[BRINGUP] cannot open %s%c", path, 10); return; }
++        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
++        u8* d = (u8*)malloc((size_t)sz);
++        if (!d || fread(d, 1, (size_t)sz, f) != (size_t)sz || sz < 128 || memcmp(d, "DDS ", 4)) {
++            fclose(f); free(d);
++            fprintf(stderr, "[BRINGUP] %s is not a DDS%c", path, 10); return;
++        }
++        fclose(f);
++        u32 th = d[12] | d[13] << 8 | d[14] << 16 | (u32)d[15] << 24;
++        u32 tw = d[16] | d[17] << 8 | d[18] << 16 | (u32)d[19] << 24;
++        u32 bx = (tw + 3) / 4, by = (th + 3) / 4;
++        if (!tw || !th || 128 + (long)bx * by * 8 > sz) { free(d); return; }
++        u8* rgba = (u8*)malloc((size_t)tw * th * 4);
++        if (!rgba) { free(d); return; }
++        for (u32 yb = 0; yb < by; yb++) for (u32 xb = 0; xb < bx; xb++) {
++            const u8* b = d + 128 + ((size_t)yb * bx + xb) * 8;
++            u16 c0 = b[0] | b[1] << 8, c1 = b[2] | b[3] << 8;
++            u8 pal[4][4];
++            dxt1_color(c0, pal[0]); dxt1_color(c1, pal[1]);
++            for (int k = 0; k < 3; k++) {
++                if (c0 > c1) { pal[2][k] = (u8)((2 * pal[0][k] + pal[1][k]) / 3);
++                               pal[3][k] = (u8)((pal[0][k] + 2 * pal[1][k]) / 3); }
++                else         { pal[2][k] = (u8)((pal[0][k] + pal[1][k]) / 2); pal[3][k] = 0; }
++            }
++            pal[2][3] = 0xFF; pal[3][3] = 0xFF;
++            u32 bits = b[4] | b[5] << 8 | b[6] << 16 | (u32)b[7] << 24;
++            for (u32 py = 0; py < 4; py++) for (u32 px = 0; px < 4; px++) {
++                u32 x = xb * 4 + px, y = yb * 4 + py;
++                if (x >= tw || y >= th) continue;
++                memcpy(rgba + ((size_t)y * tw + x) * 4, pal[(bits >> (2 * (py * 4 + px))) & 3], 4);
++            }
++        }
++        free(d);
++        bw = s_d3d.width; bh = s_d3d.height;
++        up_pitch = (bw * 4u + 255u) & ~255u;
++        D3D12_HEAP_PROPERTIES hp = {0}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
++        D3D12_RESOURCE_DESC bd = {0};
++        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
++        bd.Width = (u64)up_pitch * bh; bd.Height = 1;
++        bd.DepthOrArraySize = 1; bd.MipLevels = 1;
++        bd.Format = DXGI_FORMAT_UNKNOWN; bd.SampleDesc.Count = 1;
++        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
++        void* m = NULL; D3D12_RANGE nr = {0, 0};
++        if (FAILED(s_d3d.device->lpVtbl->CreateCommittedResource(
++                s_d3d.device, &hp, D3D12_HEAP_FLAG_NONE, &bd,
++                D3D12_RESOURCE_STATE_GENERIC_READ, NULL,
++                &IID_ID3D12Resource, (void**)&up)) ||
++            FAILED(up->lpVtbl->Map(up, 0, &nr, &m)) || !m) {
++            up = NULL; free(rgba); return;
++        }
++        for (u32 y = 0; y < bh; y++) for (u32 x = 0; x < bw; x++)
++            memcpy((u8*)m + (size_t)y * up_pitch + x * 4,
++                   rgba + ((size_t)(y * th / bh) * tw + x * tw / bw) * 4, 4);
++        D3D12_RANGE wr = {0, (SIZE_T)up_pitch * bh};
++        up->lpVtbl->Unmap(up, 0, &wr);
++        free(rgba);
++        fprintf(stderr, "[BRINGUP] DIAGNOSTIC: %s %ux%u DXT1 -> backbuffer %ux%u%c",
++                path, tw, th, bw, bh, 10);
++    }
++    if (!up || bw != s_d3d.width || bh != s_d3d.height) return;
++    D3D12_RESOURCE_BARRIER gb = {0};
++    gb.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
++    gb.Transition.pResource   = s_d3d.render_targets[fi];
++    gb.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
++    gb.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    gb.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
++    D3D12_TEXTURE_COPY_LOCATION dl = {0}, sl = {0};
++    dl.pResource = s_d3d.render_targets[fi];
++    dl.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX; dl.SubresourceIndex = 0;
++    sl.pResource = up; sl.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
++    sl.PlacedFootprint.Footprint.Format   = DXGI_FORMAT_R8G8B8A8_UNORM;
++    sl.PlacedFootprint.Footprint.Width    = bw;
++    sl.PlacedFootprint.Footprint.Height   = bh;
++    sl.PlacedFootprint.Footprint.Depth    = 1;
++    sl.PlacedFootprint.Footprint.RowPitch = up_pitch;
++    s_d3d.cmd_list->lpVtbl->CopyTextureRegion(s_d3d.cmd_list, &dl, 0, 0, 0, &sl, NULL);
++    gb.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
++    gb.Transition.StateAfter  = D3D12_RESOURCE_STATE_RENDER_TARGET;
++    s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
++}
+ 
+ static void render_frame(void)
+ {
+@@ -5797,6 +5901,7 @@
+ skip_dump_consider: ;
+     guest_fb_present(fi);
+     composite_present(fi);
++    bringup_present(fi);
+ 
+     { static int _n = 0;
+       if (PS3_LOG_FIRST(_n, 8))
