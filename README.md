@@ -7,6 +7,10 @@ No emulator. No RPCS3. Just the game as a real x86-64 executable.
 [![Status](https://img.shields.io/badge/status-early%20bring--up-orange)]()
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue)]()
 [![Built with](https://img.shields.io/badge/built%20with-ps3recomp-purple)](https://github.com/sp00nznet/ps3recomp)
+[![Language](https://img.shields.io/badge/language-C%2B%2B-00599C)]()
+[![Graphics](https://img.shields.io/badge/graphics-D3D12-green)]()
+[![Console](https://img.shields.io/badge/console-PS3-lightgrey)]()
+[![Type](https://img.shields.io/badge/type-static%20recompilation-red)]()
 
 > **Goal:** Turn the legendary PS3 racing sim into a true native PC port — higher performance potential, full moddability, and long-term preservation.
 
