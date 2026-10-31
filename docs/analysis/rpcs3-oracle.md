@@ -12,14 +12,17 @@ firmware 4.50, AMD Ryzen 5 5600 / RX 6650 XT.
 - The v1.00 US disc (`BCUS98296`, `APP_VER=01.00`) **does boot in RPCS3 with no
   official update installed**. It reaches the GT6 legal/loading screen, the
   first-run display-area screen, the epilepsy warning, the intro movie, and the
-  **Player Name (first-run profile) screen**. It then writes a real GT6 save
-  (`BCJS37016-GAME6`, files `GT6.0`…`GT6.5`) and exits/restarts.
+  **Player Name (first-run profile) screen**. It opens the GT6 on-screen
+  keyboard for the name fields, writes a real GT6 save
+  (`BCJS37016-GAME6`, files `GT6.0`…`GT6.5`), and exits/restarts. The main menu
+  was not reached because the automated run did not complete the OSK name
+  entry.
 - The real game loads the same cursor-UI assets the native port logs:
   `MenuClassDefine.adc` (PDIPFS key `K/WO`), `Prototypes.mwidget` (`K/6I`),
   `cursor.mproject` (`K/JH`), `cursor.adc` (`K/7E`), and
-  `CursorProject.gpb` (`K/W2`). **It does not load any `Prototypes.adc`.**
-  There is no TOC/keymap entry for it, and no such file appears in the
-  emulated HDD before or after the save.
+  `CursorProject.gpb` (`K/W2`). **No `Prototypes.adc` cache key or file
+  appears.** There is no TOC/keymap entry for it, and no such file exists in
+  the emulated HDD before or after the save.
 - `Prototypes.adc` is genuinely absent from the v1.00 disc, but the oracle
   shows it is **not required for the v1.00 cursor/first-run UI**. The real
   engine consumes `Prototypes.mwidget` (MPRJ) and continues. The native port's
@@ -159,9 +162,11 @@ sys_fs_open(): fd=3, Regular file, ... 14.349GB ...
 
 and then reads through its own PDI/PDIPFS layer. Individual TOC paths never
 appear in `RPCS3.log`, so the proof of what was loaded is the **PDIPFS cache
-that the game writes to the emulated HDD**. After the successful Player Name
-run, these files exist under
-`tools/RPCS3/dev_hdd0/game/BCUS98296/USRDIR/PDIPFS/`:
+that the game writes to the emulated HDD**. After the successful fullscreen run,
+these files exist under
+`tools/RPCS3/dev_hdd0/game/BCUS98296/USRDIR/PDIPFS/` (host creation time
+`2026-10-31 16:54:10`, i.e. during that run; they were not copied from the
+disc's `game/BCUS98296` folder):
 
 | Key | Compressed cache size | TOC path (from `work/gt6_pfs_keymap.tsv`) |
 |---|---:|---|
@@ -252,6 +257,18 @@ first-run restart. A follow-up boot with the save present is recorded in §7.
 | Save data | PASS | `cellSaveDataAutoSave2`, `dev_hdd0/home/00000001/savedata/BCJS37016-GAME6/GT6.0…5` |
 | Cursor assets | PASS | PDIPFS cache `K/WO`, `K/6I`, `K/JH`, `K/7E`, `K/W2` |
 | `Prototypes.adc` | NOT PRESENT / NOT LOADED | no TOC row, no cache key, no file |
+| Main menu | NOT REACHED IN AUTOMATION | OSK name entry needs manual pad-grid input; no asset error |
+
+Observed visual/draw sequence (all 2D / FMV; no 3D car or race draw before the
+Player Name screen):
+
+1. GT6 legal/copyright screen (`frames_async/frame_010s.png`).
+2. "Adjust Display Area" system screen (`fs_printwindow.png`).
+3. Epilepsy warning (`frames_input/frame_030s.png`).
+4. Intro movie (`frames_input/frame_045s.png`).
+5. Player Name + welcome boxes (`frames_input/frame_075s.png`,
+   `frames_after/frame_060s.png`).
+6. GT6 OSK (`interact/05_after_down_x.png`, `interact/08_after_ok.png`).
 
 ## 6. What the native port should copy
 
@@ -316,8 +333,61 @@ Enter (Start) at t=54/75 s. Captures under
 
 `work/rpcs3_oracle/run_after.ps1` boots again with the save and sends X at
 t=30/60 s, Enter at t=45 s, capturing under
-`work/rpcs3_oracle/frames_after/`. Its timeline/log are the final check for
-whether the main menu appears without `Prototypes.adc`.
+`work/rpcs3_oracle/frames_after/`. The game replays the intro movie, then
+returns to the **Player Name** screen with the first-run welcome boxes:
+
+- `frames_after/frame_045s.png` — intro movie again.
+- `frames_after/frame_060s.png` — Player Name screen with "Welcome to Gran
+  Turismo 6!".
+- `frames_after/frame_075s.png` — second message, "Greetings from the Gran
+  Turismo Association…".
+
+Interactive captures under `work/rpcs3_oracle/interact/` show the on-screen
+keyboard opening for the name fields:
+
+- `05_after_down_x.png` / `08_after_ok.png` — the **GT6 OSK** ("[Enter Text]",
+  A/a, @#:, Space, Backspace, Return) over the Player Name screen.
+- `06_after_typing.png` — first-name field focused after the OSK closes.
+
+The OSK is navigated with the pad grid, not host text injection; the automated
+run did not finish the name entry, so the **main menu was not reached**. This
+is an automation limit, not an asset failure: the cursor UI, the Player Name
+screen, the welcome flow, and the OSK all render with the v1.00 disc alone.
+No `Prototypes.adc` cache key or missing-asset error appeared in this flow.
+
+
+### 7.4 Key log excerpts from the successful first-run run
+
+```text
+cellSaveData: cellSaveDataAutoSave2(version=1, dirName="BCJS37016-GAME6",
+             errDialog=0, setBuf=..., funcStat=..., funcFile=..., ...)
+cellSaveData: savedata_op(): Recreating savedata. (mode=2)
+cellSaveData: SECUREFILE: GT6.1 -> 0x771d1c71e75b4e70803873f7402511a7
+cellSaveData: SECUREFILE: GT6.2 -> 0x771d1c71e75b4e70803873f7402511a7
+...
+cellKb: cellKbEnd()
+cellSysmodule: unload_module(): path="external/libsysutil_oskdialog_ext.sprx"
+sys_process: _sys_process_exit(status=0, arg2=0x0, arg3=0x0)
+```
+
+The save files are real, not RPCS3 metadata:
+
+```text
+dev_hdd0/home/00000001/savedata/BCJS37016-GAME6/
+  GT6.0  310 B
+  GT6.1  23,093 B
+  GT6.2  8,968 B
+  GT6.3  1,183 B
+  GT6.4  36 B
+  GT6.5  36 B
+  ICON0.PNG  14,214 B
+  PIC1.PNG   4,481 B
+  PARAM.SFO  3,012 B
+```
+
+The game did not create a save on the pre-created-HDD run (it stopped at the
+false "Insufficient free space" dialog); the save above is from the clean run
+with the v1.00 disc alone.
 
 ## 8. Config hygiene
 

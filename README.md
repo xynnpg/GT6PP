@@ -1,9 +1,14 @@
 # GT6PP
 
-Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. The game runs as a native x86-64 executable — no emulator at runtime.
+Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. The game runs as a native x86-64 executable - no emulator at runtime.
 
-**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads the UI scripts and `K/W2` (`CursorProject.gpb`), and presents a 1280×720 window. **First real guest draw submitted** (`draws: 1`) — it is a full-screen black cover, so the visible frame is still black.
-**Next blocker:** `K/W2` is opened and allocated to the correct raw size (`59,991 B`) but **never read**; the cache stays zero. Trace `0xA08ED0` (`StartRead`) → `0xA40FBC` (`cache_read`). `Prototypes.adc` is **not** required on v1.00 — the RPCS3 oracle proves the disc reaches the first-run UI without it.
+**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads the UI scripts and presents a 1280x720 window. **First real guest draw submitted** (`draws: 1`) - it is a full-screen black cover, so the visible frame is still black.
+
+**Where the first image comes from:** the RPCS3 oracle runs `boot.adc` -> `presents_sequence_common` -> `PresentsRootSCEA` (`K/WD`): `scei` 2 s, `notice` 2 s, `epilepsy` 4 s, then the intro. The native port currently jumps to the later cursor/menu scripts and never opens `K/LH`, `K/KG`, `K/IE`, `K/WD` or the boot fonts. That boot/presents path is the first-screen blocker - not `K/W2`.
+
+**Cache progress:** the boot/presents keys and the raw `K/W2` slice (`59,991 B`, SHA-256 `2b6153...9008`) are now seeded from the user's own `GT.VOL` into the ignored `work/` HDD tree. The oracle opens the bare `/PDIPFS/K/<key>` files; the native port was opening zero-length `PDIPFS_bdmark` markers instead. Removing that marker path is under test.
+
+`Prototypes.adc` is **not** required on v1.00 - the RPCS3 oracle proves the disc reaches the first-run UI without it.
 
 ![GT6PP bring-up status](docs/progress.png)
 
@@ -21,7 +26,7 @@ $env:PPU_STUCKMAX="1000000"
 gt6\build\gt6.exe work\bin\EMAIN.elf
 ```
 
-The console window is the log. The separate 1280×720 window is the game's framebuffer.
+The console window is the log. The separate 1280x720 window is the game's framebuffer.
 
 ## Build
 
@@ -37,8 +42,10 @@ The relift pipeline (`scripts/relift-gt6.ps1`) regenerates `gt6/generated/`.
 
 ## Tooling
 
-- `tools/GTToolsSharp/` — GT.VOL listing/extraction.
-- Ghidra 10.4 headless + `tools/ghidra_scripts/DecompileAt.java` — targeted PPU/SPU decompilation.
+- `tools/GTToolsSharp/` - GT.VOL listing/extraction.
+- Ghidra 10.4 headless + `tools/ghidra_scripts/DecompileAt.java` - targeted PPU/SPU decompilation.
+- `tools/gt6_seed_pfs_cache.py` - copy the raw boot/presents slices from your own GT.VOL into the local PFS cache.
+- `tools/gt6_frame_check.py` - verify a captured backbuffer BMP contains visible pixels.
 - `tools/ghidra-reverse` / `binary-analysis-patterns` agent skills.
 - Details and restrictions: [docs/TOOLING.md](docs/TOOLING.md).
 
@@ -53,14 +60,23 @@ The relift pipeline (`scripts/relift-gt6.ps1`) regenerates `gt6/generated/`.
 | HLE / threads | 1,216 NID handlers; SPU event-handler crash fixed |
 | Present / clears | Flips and `CLEAR_SURFACE` reach D3D12 |
 | UI scripts | `MenuClassDefine`, `Prototypes.mwidget`, `cursor.*` load |
+| PFS cache | Boot/presents + font slices seeded from `GT.VOL`; raw `K/W2` matches the TOC |
+| Frame capture | Backbuffer BMP capture + `tools/gt6_frame_check.py` (no desktop screenshots) |
+| Intro (offline) | `cryptmovie` -> `PAMF0041` -> demux -> 136 s 1080p H.264/AAC MP4 |
 
 ## Next up
 
-- Fix the `K/W2` `StartRead` path so the raw cache fills and the cursor UI runs.
-- Render the first **non-black** UI draw through D3D12.
-- Then textures/fonts, menus, audio/input, performance.
+- Make the guest take the oracle's bare `/PDIPFS/K/<key>` path, then load `boot.adc` / `PresentsRootSCEA`.
+- Render the first **non-black** legal/loading frame (textures/fonts on the no-VP UI path).
+- Then menus, audio/input, performance; in-engine PAMF playback is a separate clean-room HLE task.
 
 The RPCS3 oracle (`docs/analysis/rpcs3-oracle.md`) confirms the v1.00 disc alone reaches the legal/loading screen, first-run UI and intro; `Prototypes.adc` is a native loader/path artifact, not a missing game file.
+
+## Contributors
+
+- **[@xynnpg](https://github.com/xynnpg)** - project owner, direction, testing, and the RPCS3 oracle runs.
+
+See [CONTRIBUTORS.md](CONTRIBUTORS.md) to add yourself.
 
 ## Legal
 

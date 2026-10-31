@@ -56,23 +56,26 @@ the RSX viewport transform when no VP is used. New `[DRAWDIAG]` and
 | `present` | `d3d12_present` | **gate**: only calls `render_frame()` when the batch is empty or contains a non-clear draw with `rt_off == 0` (display target). An offscreen-only batch is not replayed by this callback. The explicit `rsx_d3d12_backend_present()` does replay offscreen batches but only presents when display content exists. |
 | `clear` | `d3d12_clear` | display clears only set `s_d3d.clear_color` (and are not recorded); offscreen/depth clears are recorded as ordered ops. A display clear with no display draws returns and keeps the batch accumulating. |
 | `set_render_target` | `d3d12_set_render_target` | stores `current_rsx_state` and logs; does not create or bind anything. Targets are resolved per draw by `current_rt_off()` and created on demand by `off_rt_get()` / `off_ds_get()` in `render_frame()`. Not a stub in effect, but the callback itself does no D3D12 work. |
-| `set_viewport` | `d3d12_set_viewport` | **STUB (no-op)**. Draws use `state->viewport_x/y/w/h`, captured per record and applied in the VP pass. `state->scissor_*` is never read at all; the VP pass uses the viewport rect as the scissor. Fine for full-target draws; wrong for guest scissor/sub-rect state. |
+| `set_viewport` | `d3d12_set_viewport` | **STUB (no-op)**. VP draws use `state->viewport_x/y/w/h` applied in the VP pass; the fixed-function path applies `viewport_scale/offset` in `read_rsx_vertex()`. `state->scissor_*` is never read at all; the VP pass uses the viewport rect as the scissor. Fine for full-target draws; wrong for guest scissor/sub-rect state. |
 | `set_blend` | `d3d12_set_blend` | logging only. Blend enable/factors are captured per draw (`rsx_blend_key`) and become a PSO key only for guest-FP PSOs. The `fp_addr == 0` fallback PSO ignores guest blend. |
 | `set_depth_stencil` | `d3d12_set_depth_stencil` | logging only. `rsx_zs_key` is captured per draw and used by `vp_get_fp_pso()`. Fallback PSOs use fixed depth state. |
 | `set_color_mask` | **not registered** (`NULL` in `s_d3d12_backend`) | `rsx_commands.c` guards the call, so this is skipped. The draw record captures `state->color_mask` and passes it to the guest-FP PSO key. |
 | `set_alpha_test` | **not registered** (`NULL`) | same: draw record captures `alpha_test_enable/func/ref`; the guest-FP HLSL and the fallback colour PS may not honour it if the FP path is absent. |
 | `set_shader` | `d3d12_set_shader` | logging only, with a TODO. The actual FP address is captured at draw time (`dr->fp_addr`), and PSO lookup/compile happens in `vp_get_fp_pso()`. Not a drop. |
 | `set_vertex_attribs` | `d3d12_set_vertex_attribs` | logging only; vertex data is fetched at draw/upload time from `current_rsx_state`. Not a drop. |
-| `draw_arrays` | `d3d12_draw_arrays` | fully implemented; records legacy or VP draws for replay. Gates below. |
+| `draw_arrays` | `d3d12_draw_arrays` | fully implemented; records legacy or VP draws for replay. Recognizes the accumulator's `0x0FF00000` immediate scratch and routes it to the immediate path. Legacy records now read attr3 colour, attr8..15/attr2 UV, and apply the guest viewport transform. Gates below. |
 | `rsx_d3d12_backend_draw_immediate` | `rsx_d3d12_backend_draw_immediate` (public backend entry, not a vtable slot) | accepts a temporary window-space vertex array for constant-attribute/immediate blocks; expands to a triangle list and records `is_immediate`. Does not consult attribute arrays or `current_rsx_state`. |
 | `draw_indexed` | `d3d12_draw_indexed` | VP path only. It returns early if `!pipeline_ready`, bad count, or `!vp_vb_mapped || !vp_root_sig`. Non-indexed fallback state (no VP) cannot be drawn indexed. |
 | `bind_texture` | `d3d12_bind_texture` | implemented. Only a whitelist of RSX formats is accepted (`0x81, 0x85, 0x8B, 0x86..0x88, 0x9A`); an unsupported format does not clear `cur_texs[unit].set`, so the draw can inherit a stale texture. `tex_bound` (legacy atlas path) is only set for B8. |
 
 ## Immediate / constant-attribute draws (GT6 DATA2F)
 
-GT6's first block has no vertex-attribute array and no `DRAW_ARRAYS`; it is
-`SET_BEGIN_END(6)`, ten `SET_VERTEX_DATA2F_M` ATTR0 writes, `SET_BEGIN_END(0)`.
-The backend now has an explicit entry point for exactly this.
+GT6's first block has no vertex-attribute array and no native `DRAW_ARRAYS`;
+it is `SET_BEGIN_END(6)`, ten `SET_VERTEX_DATA2F_M` ATTR0 writes,
+`SET_BEGIN_END(0)`. The FIFO accumulator synthesizes a `draw_arrays` call from
+those vertices; the backend recognizes the accumulator's scratch array and
+routes it through the immediate path. There is also an explicit public entry
+point for accumulators that can carry more than attr0.
 
 ### API
 
@@ -105,7 +108,9 @@ u32 rsx_d3d12_backend_draw_immediate(u32 primitive,
 - Returns the number of host triangle-list vertices recorded (24 for a
   ten-vertex strip), or 0 if the draw could not be recorded.
 - Targets the display backbuffer (`rt_off = 0`). Call it on the FIFO drain
-  thread, once per completed `BEGIN/END` block.
+  thread, once per completed `BEGIN/END` block. The scratch path always
+  composes on the backbuffer; if the guest surface is offscreen it is logged
+  but not used for the 2D immediate block.
 
 The entry point is a public function in `rsx_d3d12_backend.h`, not a new
 `rsx_backend` vtable slot: `rsx_commands.h` is outside this change's editable
@@ -272,11 +277,11 @@ For `NV4097_DRAW_ARRAYS` to produce pixels:
    attr8..15 (then attr2), and the guest viewport transform is applied when
    `viewport_scale` is programmed. Without `vertex_constants[0..3]` the MVP is
    the identity.
-5. **QUADS** always prefer the VP path whenever `vp_vb_mapped && vp_root_sig`
-   exist, even if no VP microcode was captured. Consequence: a quad drawn
-   before the first VP is compiled records `is_vp = 1` and is then dropped by
-   the render pass until `vp_ready` becomes 1. (Triangles do not have this
-   asymmetry.)
+5. **QUADS** use the VP path only when the guest actually has a vertex
+   program (`vp_ucode_bytes >= 16`) and VP resources. Without one they fall to
+   the legacy expansion, which carries colour/UV and the viewport transform.
+   (Previously they always preferred the VP path and were dropped while
+   `vp_ready` was 0.)
 6. **STRIP/FAN** with a VP are expanded to triangle lists by
    `upload_strip_vp()`. Without a VP, a FAN falls through to the legacy path
    with topology `TRIANGLES` and is **not** expanded: only the first triangle
@@ -372,10 +377,14 @@ did not exist in that build):
 [SELFTEST] RESULT: PASS
 ```
 
-After rebuilding with the immediate entry point, expect a third line:
+After rebuilding with the immediate entry point, expect:
 
 ```
+[SELFTEST] legacy    recorded=1 verts=0  ... -> PASS
 [SELFTEST] immediate recorded=1 verts=24 readback=1 ... tlwhite=1024/1024 ... -> PASS
+[SELFTEST] vp        recorded=1 verts=0  ... -> PASS
+[SELFTEST] vp        cleanup: vp_ready=0
+[SELFTEST] RESULT: PASS
 ```
 
 This revision was not built/run (per task instruction), so the immediate line is

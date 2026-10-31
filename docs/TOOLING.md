@@ -59,6 +59,69 @@ analyzed with `renderdoccmd`/the RenderDoc Python API.
 you supply. It is not used on the v1.00 disc. After extracting
 `Prototypes.adc`, install it with `tools/gt6_install_companion_script.py`.
 
+## PFS cache seeding (boot/presents assets)
+
+The native HDD tree originally held only 11 PDIPFS keys, so the guest never
+opened `K/LH` (`boot.adc`), `K/KG`, `K/IE`, `K/WD` or the boot fonts. Seed the
+raw GT.VOL slices (still volume-encrypted, like the working `K/IK`) with:
+
+```powershell
+python tools\gt6_seed_pfs_cache.py --boot-set --dry-run
+python tools\gt6_seed_pfs_cache.py --boot-set
+python tools\gt6_seed_pfs_cache.py --boot-set --verify
+```
+
+The tool reads `work/gt6_pfs_keymap.tsv`, copies each `ZSize` slice from
+`gt6/GT.VOL` into `work/gt6_hdd0/.../PDIPFS/K/<key>`, and creates zero-length
+`PDIPFS_bdmark/K/<key>` markers. It never decrypts or fabricates data. See
+`docs/analysis/pfs-cache-seeding.md`.
+
+## Frame capture and visibility check (no desktop screenshots)
+
+The D3D12 backend dumps its own backbuffer, so a window/desktop capture is not
+needed and cannot silently grab the wrong window:
+
+```powershell
+$env:RSX_CAP="1:4:60"                 # start frame_count[:count[:stride]]
+$env:RSX_CAP_DIR="work/rsxcap_baseline"
+gt6\build\gt6.exe work\bin\EMAIN.elf
+python tools\gt6_frame_check.py work\rsxcap_baseline `
+  --glob "frame_*/backbuffer.bmp" --min-nonblack 5
+```
+
+`frame_NN/backbuffer.bmp` is the composed frame; `frame_NN/manifest.txt` lists
+every clear/draw with surface, shader, texture and VP state. The checker reports
+non-black coverage, mean/peak luma, distinct colours and the lit bounding box;
+exit 0 means a visible frame. The method is adapted from GT4Recomp's
+`gs_frame_metrics` (MIT), not its code.
+
+## PAMF movies (`work/gt6_vol/movies/*.pam`)
+
+The extracted `.pam` files are still **Salsa20-encrypted at the movie layer**;
+GTToolsSharp's unpack decrypts only the PDIPFS/GT.VOL layer. The per-movie key is
+in `database/gt6/menudb.dat`, table `t_movie`, column `Key`.
+
+```powershell
+# On copies only; do not edit the extracted game data.
+# <MENUDB_KEY> is the public constant in GTToolsSharp/Encryption/KeysetStore.cs.
+tools\GTToolsSharp\win-x64\GTToolsSharp.exe cryptsalsa -i work\pamf_test\menudb.dat -k <MENUDB_KEY>
+# Read t_movie.Key for the desired FileName with any SQLite client, then:
+tools\GTToolsSharp\win-x64\GTToolsSharp.exe cryptmovie -i work\pamf_test\tv_10006.pam -k $key
+python tools\pamf_info.py work\pamf_test\tv_10006.pam --check-packs
+tools\pamftool\PAMFtool.exe -demux work\pamf_test\tv_10006.pam work\pamf_test\demux10006
+tools\ffmpeg\ffmpeg-9.0.2-essentials_build\bin\ffmpeg.exe -i work\pamf_test\demux10006\tv_10006.s00_avc.h264 -frames:v 1 out.png
+```
+
+* `tools/pamf_info.py` is a clean-room reference parser for decrypted PAMF
+  0040/0041 files; it does not handle encryption.
+* PAMFtool v1.3 is **GPLv3** and has no encryption support. Keep it a separate
+  process; do not link/copy its code into the MIT runtime.
+* FFmpeg has no PAMF demuxer; it does have H.264 and ATRAC3+ decoders. Feed it
+  PAMFtool's demuxed `.h264`/`.at3` outputs.
+* The runtime fix is in the HLE, not the disc file: `cellPamf.c` uses the wrong
+  header offsets and `cellDmux` lacks the `OpenEx`/`QueryAttr` PAMF backend. See
+  `docs/analysis/pamf-intro-fix.md` for the exact layout and ranked plan.
+
 ## Restricted sources (do not use)
 
 - `third_party/PDTools/AGENTS.md` prohibits AI/LLM use of that repository.

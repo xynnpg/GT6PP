@@ -51,6 +51,11 @@ tools/ghidra_dl/
 tools/ghidra_10*/
 tools/pkg2zip/
 tools/renderdoc/
+tools/reference/
+tools/dotnet8/
+tools/pamftool/
+tools/ffmpeg/
+tools/dotnet-install.ps1
 tools/*.zip
 
 # Python

@@ -46,7 +46,7 @@ LEFT = [
     Block(0, 0, 14, 10, "BOOT", 140, 140),
     Block(14, 0, 14, 10, "PPU LIFT", 140, 140),
     Block(28, 0, 12, 10, "HLE", 84, 120, 12),
-    Block(0, 10, 14, 10, "PFS CACHE", 70, 140, 35),
+    Block(0, 10, 14, 10, "PFS CACHE", 90, 140, 30),
     Block(14, 10, 14, 10, "SCRIPT VM", 70, 140, 35),
     Block(28, 10, 12, 10, "SPU / SPURS", 90, 120, 12),
     Block(0, 20, 20, 8, "THREADS / SYNC", 140, 160, 10),
@@ -55,10 +55,10 @@ LEFT = [
 RIGHT = [
     Block(0, 0, 12, 10, "GCM INIT", 120, 120),
     Block(12, 0, 10, 10, "CLEARS", 100, 100),
-    Block(22, 0, 10, 10, "D3D12", 90, 100, 5),
-    Block(32, 0, 8, 10, "DRAW 1", 0, 80, 2),
-    Block(0, 10, 14, 10, "DATA2F", 20, 140, 20),
-    Block(14, 10, 14, 10, "TEXTURES", 0, 140, 8),
+    Block(22, 0, 10, 10, "D3D12", 92, 100, 6),
+    Block(32, 0, 8, 10, "DRAW 1", 8, 80, 8),
+    Block(0, 10, 14, 10, "DATA2F", 30, 140, 24),
+    Block(14, 10, 14, 10, "TEXTURES", 6, 140, 10),
     Block(28, 10, 12, 10, "AUDIO OUT", 0, 120),
     Block(0, 20, 14, 8, "INPUT", 0, 112),
     Block(14, 20, 14, 8, "PHYSICS", 0, 112),
@@ -123,8 +123,8 @@ def main() -> None:
     # panel origins: grid starts at x=36/636; headers above
     left_ox, right_ox = 36, 636
     top_oy = 84
-    p.extend(draw_panel(LEFT, left_ox, top_oy, "PPU / system bring-up", "GUEST SYSTEM · MEASURED 2026-10-31"))
-    p.extend(draw_panel(RIGHT, right_ox, top_oy, "RSX / draw path", "RENDER · MEASURED 2026-10-31"))
+    p.extend(draw_panel(LEFT, left_ox, top_oy, "PPU / system bring-up", "GUEST SYSTEM · MEASURED 2026-10-31 LATE"))
+    p.extend(draw_panel(RIGHT, right_ox, top_oy, "RSX / draw path", "RENDER · MEASURED 2026-10-31 LATE"))
 
     # vertical separator
     p.append(f'<line x1="{W//2}" y1="10" x2="{W//2}" y2="{H-30}" stroke="{EDGE}" stroke-width="1"/>')
