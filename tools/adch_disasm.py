@@ -209,8 +209,11 @@ def read_frame(r: Reader, depth: int, max_ins: int, out: list[str], label: str):
             elif name in FRAME:
                 sub_label = "FUNCTION_CONST" if name == "FUNCTION_CONST" else (
                     "METHOD_CONST" if name == "METHOD_CONST" else "FUNCTION/METHOD")
-                out.append(f"{ind}  {at:05X}|{line:4d}|{i:4d}| {name} {sub_label}")
-                read_frame(r, depth + 1, max_ins, out, sub_label)
+                fname = ""
+                if name in ("FUNCTION_DEFINE", "METHOD_DEFINE"):
+                    fname = " " + fmt_sym(r.symbol())
+                out.append(f"{ind}  {at:05X}|{line:4d}|{i:4d}| {name}{fname}")
+                read_frame(r, depth + 1, max_ins, out, sub_label + fname)
                 continue
             out.append(f"{ind}  {at:05X}|{line:4d}|{i:4d}| {name} {args}".rstrip())
         except Exception as e:

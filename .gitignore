@@ -47,6 +47,9 @@ third_party/
 tools/GTToolsSharp/
 tools/RPCS3/
 tools/llvm-mingw/
+tools/ghidra_dl/
+tools/ghidra_10*/
+tools/*.zip
 
 # Python
 __pycache__/
