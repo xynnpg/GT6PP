@@ -138,6 +138,7 @@ def main() -> None:
     p.append(f'<rect x="230" y="{ly-7}" width="8" height="8" fill="{DARK}" stroke="{EDGE}" stroke-width="0.5"/>')
     p.append(f'<text x="244" y="{ly}" class="foot">not started</text>')
     p.append(f'<text x="{W-36}" y="{ly}" text-anchor="end" class="foot">GT6PP · checklist cells, not code coverage · no game data or recompiled code in this repo</text>')
+    p.append("</svg>")
 
     out = Path("docs/progress.svg")
     out.parent.mkdir(parents=True, exist_ok=True)

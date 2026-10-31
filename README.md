@@ -5,7 +5,9 @@ Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. Th
 **Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads UI scripts, and presents a 1280×720 window. **No real draw yet** — the window is black (`draws: 0`).
 **Next blocker:** `0x9F44D8` null vcall → K/W2 cache read → first `DATA2F` draw.
 
-![GT6PP bring-up status](docs/progress.svg)
+![GT6PP bring-up status](docs/progress.png)
+
+*Source: `docs/progress.svg`; rendered PNG is used because GitHub and the app preview do not reliably render the SVG.*
 
 ## Run
 
