@@ -107,11 +107,17 @@ def add_script_hooks(root: Path) -> int:
 # MGOM.start("boot") at manager+0x48/+0x50.  These hooks are read-only trace
 # points for that handoff; none writes guest state.
 BOOT_PRESENTS_HOOKS = (
+    ("ppu_recomp_015.cpp", "func_006C4EC0", "gt6_mgom_class_probe"),
+    ("ppu_recomp_015.cpp", "func_006C5064", "gt6_mgom_class_probe"),
+    ("ppu_recomp_015.cpp", "func_006C55DC", "gt6_mgom_factory_probe"),
+    ("ppu_recomp_015.cpp", "func_006C4A5C", "gt6_mgom_ctor_probe"),
+    ("ppu_recomp_022.cpp", "func_009E2914", "gt6_mgom_vector_clear_probe"),
     ("ppu_recomp_023.cpp", "func_00A11F20", "gt6_menu_worker_prepare"),
     ("ppu_recomp_023.cpp", "func_00A122D4", "gt6_menu_worker_entry"),
     ("ppu_recomp_015.cpp", "func_006C54DC", "gt6_mgom_start_probe"),
     ("ppu_recomp_015.cpp", "func_006C4DC0", "gt6_mgom_setroot_probe"),
     ("ppu_recomp_012.cpp", "func_00568C94", "gt6_menu_project_request"),
+    ("ppu_recomp_013.cpp", "func_005FA338", "gt6_project_load_probe"),
 )
 
 
