@@ -114,6 +114,13 @@ python third_party/ps3recomp/tools/ppu_lifter.py work/bin/EMAIN.elf `
 This writes `gt6/generated/ppu_recomp.h`, 32 `ppu_recomp_*.cpp` chunks, and a
 function table. It is CPU-heavy and can take a long time for 33k functions.
 
+The first bootable lift only needs the OPD list. If the boot log shows
+`unresolved indirect call`, run `find_functions.py` with the OPD list as a seed,
+add the reported targets (especially multi-entry memset/memcpy families), and
+relift. The GT6PP tree's final list is
+`work/analysis/emain/functions_final3.json` (68,149 explicit boundaries); it is
+not committed because it is derived from the game binary.
+
 If you need better function coverage, run `find_functions.py` with the OPD list
 as a seed and merge the results before lifting:
 

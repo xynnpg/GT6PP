@@ -87,9 +87,9 @@ Command used:
 
 ```powershell
 python third_party/ps3recomp/tools/ppu_lifter.py work/bin/EMAIN.elf `
-  --functions work/analysis/emain/functions_code.json `
+  --functions work/analysis/emain/functions_final3.json `
   --hle-stubs work/analysis/emain/hle_stubs.json `
-  --output gt6/generated --code-end 0xF908C4 --chunks 32 --jobs 8
+  --output gt6/generated --code-end 0xF908C4 --chunks 40 --jobs 8
 ```
 
 Result: **78,770 functions** lifted (68,149 explicit boundaries plus 10,621
