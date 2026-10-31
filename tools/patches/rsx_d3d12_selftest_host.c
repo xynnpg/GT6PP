@@ -9,8 +9,9 @@
  * back and checked numerically.
  *
  * Build/run with tools/patches/run_rsx_d3d12_selftest.ps1. Expected:
- *   [SELFTEST] legacy ... PASS
- *   [SELFTEST] vp     ... PASS
+ *   [SELFTEST] legacy    ... PASS
+ *   [SELFTEST] immediate ... PASS
+ *   [SELFTEST] vp        ... PASS
  *   [SELFTEST] RESULT: PASS
  *
  * The same test runs automatically in the emulator with

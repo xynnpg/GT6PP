@@ -38,6 +38,21 @@ Installed globally in `~/.agents/skills/`:
 - `binary-analysis-patterns` — disassembly/decompilation/CFG checklists.
 - `ghidra-reverse` — Ghidra headless workflow and decompilation.
 
+## RenderDoc 1.46 (D3D12 frame capture)
+
+Installed under `tools/renderdoc/` (ignored by git). Use it to inspect why the
+first `draw_arrays` is black: the 1440×1080 offscreen target, vertex colors,
+shader outputs, resources and the present path.
+
+```powershell
+tools\renderdoc\renderdoccmd.exe capture --help
+# or launch the GUI:
+tools\renderdoc\qrenderdoc.exe
+```
+
+The `cli-anything-renderdoc` agent skill is installed; the capture file can be
+analyzed with `renderdoccmd`/the RenderDoc Python API.
+
 ## PKG update extraction (optional)
 
 `tools/pkg2zip/pkg2zip.exe` (MIT) is installed for the official GT6 update PKG

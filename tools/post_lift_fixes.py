@@ -35,6 +35,20 @@ ADCH_REQUIRED = (
     "loc_009878B8:",
 )
 
+# PDIPSX::FileDeviceHost published a stack-local FileInternalStreamDefault at
+# +0x1C2C and its Flush callback dereferenced it after the local died, which is
+# the measured null vcall at 0x009F4550 (File+0x40 == 0x70, [0x70] == 0).
+# tools/gt6_filedevice_flush_patch.py adds the two lifetime guards.  A relift
+# without them reintroduces the null dispatch.
+FILEDEV_FLUSH_FUNC = "func_00A08B8C"
+FILEDEV_FLUSH_REQUIRED = (
+    "if (vm_read8(ctx->gpr[3] + 0x1C29) == 0) return;",
+)
+FILEDEV_INIT_FUNC = "func_00A08A00"
+FILEDEV_INIT_REQUIRED = (
+    "vm_write32(ctx->gpr[29] + 0x1C2C, 0);",
+)
+
 
 def find_function(text: str, name: str) -> str | None:
     key = f"void {name}(ppu_context* ctx)"
@@ -86,6 +100,25 @@ def main(argv: list[str]) -> int:
         print(f"expected exactly one {ADCH_FUNC}, found {adch_found}",
               file=sys.stderr)
         return 1
+
+    # FileDeviceHost stale read-stream guard (docs/analysis/filedevice-null-vcall-fix.md)
+    for fname, required in ((FILEDEV_FLUSH_FUNC, FILEDEV_FLUSH_REQUIRED),
+                            (FILEDEV_INIT_FUNC, FILEDEV_INIT_REQUIRED)):
+        n = 0
+        for path in sorted(root.glob("ppu_recomp_*.cpp")):
+            body = find_function(path.read_text(encoding="latin-1"), fname)
+            if body is None:
+                continue
+            n += 1
+            missing = [m for m in required if m not in body]
+            if missing:
+                print(f"{path.name}: {fname} FileDeviceHost guard missing {missing}; "
+                      "run tools/apply_gt6_post_lift.py", file=sys.stderr)
+                return 1
+            print(f"{path.name}: {fname} FileDeviceHost guard OK")
+        if n != 1:
+            print(f"expected exactly one {fname}, found {n}", file=sys.stderr)
+            return 1
     return 0
 
 

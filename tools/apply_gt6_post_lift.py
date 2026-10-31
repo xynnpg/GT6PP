@@ -23,6 +23,11 @@ except ImportError:  # pragma: no cover - script run outside tools/
     patch_text = None         # type: ignore
     verify_text = None        # type: ignore
 
+try:
+    import gt6_filedevice_flush_patch as filedev
+except ImportError:  # pragma: no cover - script run outside tools/
+    filedev = None  # type: ignore
+
 FUNC_RE = re.compile(r"^void (func_[0-9A-F]{8})\(ppu_context\* ctx\) \{", re.M)
 
 
@@ -96,6 +101,34 @@ def add_script_hooks(root: Path) -> int:
     return changed
 
 
+def patch_filedevice_flush(root: Path) -> int:
+    """Stop PDIPSX::FileDeviceHost from publishing/dereferencing a dead stack
+    FileInternalStreamDefault (guest 0x00A08A74 / 0x00A08B8C).
+
+    See docs/analysis/filedevice-null-vcall-fix.md.  The edits are idempotent
+    and leave an active-read path untouched.
+    """
+    if filedev is None:
+        print("warning: gt6_filedevice_flush_patch.py not importable; "
+              "FileDeviceHost stale-stream guard was not applied", file=sys.stderr)
+        return 0
+    total = 0
+    for path in sorted(root.glob("ppu_recomp_*.cpp")):
+        s = path.read_text(encoding="latin-1")
+        if "func_00A08B8C" not in s and "func_00A08A00" not in s:
+            continue
+        patched, n = filedev.patch_text(s)
+        errs = filedev.verify_text(patched)
+        if errs:
+            print(f"{path.name}: FileDeviceHost patch verification failed: {errs}",
+                  file=sys.stderr)
+            continue
+        if n:
+            path.write_text(patched, encoding="latin-1")
+        total += n
+    return total
+
+
 def patch_adch_switch(root: Path) -> int:
     """Apply tools/gt6_adch_switch_patch.py to the generated parser file.
 
@@ -137,8 +170,9 @@ def main(argv: list[str]) -> int:
     guards = add_setjmp_guards(root)
     hooks = add_script_hooks(root)
     adch = patch_adch_switch(root)
+    filedev_changes = patch_filedevice_flush(root)
     print(f"post-lift: setjmp guards added {guards}; script hooks changed {hooks}; "
-          f"ADCH switch changes {adch}")
+          f"ADCH switch changes {adch}; FileDeviceHost changes {filedev_changes}")
     return 0
 
 

@@ -1487,12 +1487,12 @@
 <rect x="954" y="82" width="83" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="956" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
 <rect x="966" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="976" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="986" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="996" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="1006" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="1016" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
-<rect x="1026" y="84" width="9" height="9" fill="#14532d" stroke="#0b2b16" stroke-width="0.4"/>
+<rect x="976" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
+<rect x="986" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
+<rect x="996" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
+<rect x="1006" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
+<rect x="1016" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
+<rect x="1026" y="84" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="956" y="94" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="966" y="94" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="976" y="94" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
@@ -1565,8 +1565,8 @@
 <rect x="1006" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="1016" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="1026" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
-<text x="959" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">DRAW</text>
-<text x="959" y="94" class="blk">DRAW</text>
+<text x="959" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">DRAW 1</text>
+<text x="959" y="94" class="blk">DRAW 1</text>
 <rect x="634" y="182" width="143" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="636" y="184" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="646" y="184" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>

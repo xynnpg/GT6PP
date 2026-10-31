@@ -587,10 +587,11 @@ int main(int argc, char* argv[])
      * stuck guard aborts the process before the first flips; raise it for this
      * title unless the caller chose a stricter value. */
     if (!getenv("PPU_STUCKMAX")) _putenv_s("PPU_STUCKMAX", "1000000");
-    /* GT6's guest display buffers are 1280x720 pitch 6144. Until the guest
-     * context's FIFO flip is wired through, presenting the guest buffer keeps
-     * the window stable instead of exiting on the empty-swapchain path. */
-    if (!getenv("GCM_GUEST_FB")) _putenv_s("GCM_GUEST_FB", "0,1280,720,6144");
+    /* The D3D12 backend now presents the guest draw stream. Do not copy guest
+     * display buffer 0 over the backbuffer by default: that would hide a real
+     * frame. GT6_GUEST_FB_FORCE=1 restores the old diagnostic fallback. */
+    if (getenv("GT6_GUEST_FB_FORCE") && !getenv("GCM_GUEST_FB"))
+        _putenv_s("GCM_GUEST_FB", "0,1280,720,6144");
     /* Double-click runs are quiet: the runtime logs thousands of lines on the
      * console once the SPU job chains start. Keep them in work/gt6.log unless
      * the caller asked for verbose output or an explicit console. */

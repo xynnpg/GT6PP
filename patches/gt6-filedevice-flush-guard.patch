@@ -1,0 +1,46 @@
+# Reference diff for the PDIPSX::FileDeviceHost stale read-stream fix.
+#
+# This is NOT applied to the checked-in generated tree.  After a relift run:
+#     python tools/gt6_filedevice_flush_patch.py gt6/generated
+# or the normal post-lift entry point:
+#     python tools/apply_gt6_post_lift.py gt6/generated
+#
+# Analysis: docs/analysis/filedevice-null-vcall-fix.md
+#
+# Why this is needed:
+#   func_00A08A00 (guest 0x00A08A00) builds a PDISTD::FileInternalStreamDefault
+#   in its own stack frame at r1+0x70, publishes that stack address at
+#   this+0x1C2C (guest 0x00A08A74), then destroys the local at 0x00A08AB4 and
+#   returns.  FileDeviceHost::Flush (func_00A08B8C) later sets the
+#   "flush requested" byte +0x1C28 and pumps func_00A08ADC, which reloads the
+#   dead +0x1C2C and calls PDISTD::FileStream::read (func_009F44D8).  That
+#   helper reads [stream+0x44] -> File, [File+0x40] -> FileDevice, then
+#   dispatches FileDevice->vtable[+0x8C].  The measured run had File+0x40 ==
+#   0x70, [0x70] == 0, so the dispatch became bctrl 0 at guest 0x009F4550.
+#
+#   +0x1C29 is the read-active byte.  func_00A08ED0 (StartRead) sets it to 1
+#   and installs the caller's live stream at +0x1C2C; func_00A09130 clears it
+#   on completion.  A Flush with +0x1C29 == 0 has nothing to drain.
+#
+# Result: the stale stack pointer is cleared when its object dies, and Flush
+# is a no-op when no read is active.  An active-read path is unchanged.
+
+--- a/gt6/generated/ppu_recomp_023.cpp
++++ b/gt6/generated/ppu_recomp_023.cpp
+@@ -13679,6 +13679,7 @@ void func_00A08A00(ppu_context* ctx) {
+         ctx->lr = 0x00A08AB4; func_00A21E04(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[3] = ctx->gpr[26] | ctx->gpr[26];
+         ctx->lr = 0x00A08ABC; func_009F42D8(ctx); DRAIN_TRAMPOLINE(ctx);
++        vm_write32(ctx->gpr[29] + 0x1C2C, 0); /* local FileInternalStreamDefault is destroyed */
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0x230);
+         ctx->gpr[26] = _cs_26;
+         ctx->gpr[27] = _cs_27;
+@@ -13746,6 +13747,8 @@ loc_00A08B6C:
+ 
+ void func_00A08B8C(ppu_context* ctx) {
+     PPU_MM_SNAP
++        /* no read in progress: nothing to flush; +0x1C2C may be stale */
++        if (vm_read8(ctx->gpr[3] + 0x1C29) == 0) return;
+         ctx->gpr[9] = ctx->gpr[3] | ctx->gpr[3];
+         ctx->gpr[0] = (int64_t)(int32_t)(1);
+         ctx->gpr[3] = ppc_rldicl(ctx->gpr[3], 0, 32);

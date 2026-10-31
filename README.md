@@ -2,8 +2,8 @@
 
 Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. The game runs as a native x86-64 executable — no emulator at runtime.
 
-**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads UI scripts, and presents a 1280×720 window. **No real draw yet** — the window is black (`draws: 0`).
-**Next blocker:** `0x9F44D8` null vcall → K/W2 cache read → first `DATA2F` draw.
+**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads UI scripts, and presents a 1280×720 window. **First real guest draw submitted** (`draws: 1`) — it is a full-screen black fade/cover, so the visible frame is still black.
+**Next blocker:** `0x9F44D8` null vcall → K/W2 cache read → next UI draw.
 
 ![GT6PP bring-up status](docs/progress.png)
 
