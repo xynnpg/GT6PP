@@ -8,6 +8,8 @@ Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. Th
 
 **Cache progress:** the boot/presents keys and the raw `K/W2` slice (`59,991 B`, SHA-256 `2b6153...9008`) are now seeded from the user's own `GT.VOL` into the ignored `work/` HDD tree. The oracle opens the bare `/PDIPFS/K/<key>` files; the native port's cached assets take the `PDIPFS_bdmark` branch, and simply deleting the markers does not help. The remaining W2 blocker is the mount/device selection: the `HFileReader` gets a host `FileObject` instead of the PFS cache owner (`docs/analysis/pfs-mount-device-check.md`).
 
+**Diagnostic overlay (not game-rendered):** a CPU-decoded `notice.dds` from the user's own `PresentsRootSCEA.gpb` can be composited over the backbuffer with `GT6_BRINGUP_DDS`. It proves the D3D12 present/capture path and DXT1 decode, **not** the game's legal draw. The real frame is still black; the overlay is not used as a progress proof. See `docs/analysis/lwcond-experiment.md` for the current runtime experiment.
+
 `Prototypes.adc` is **not** required on v1.00 - the RPCS3 oracle proves the disc reaches the first-run UI without it.
 
 ![GT6PP bring-up status](docs/progress.png)
@@ -66,8 +68,8 @@ The relift pipeline (`scripts/relift-gt6.ps1`) regenerates `gt6/generated/`.
 
 ## Next up
 
-- Make the guest take the oracle's bare `/PDIPFS/K/<key>` path, then load `boot.adc` / `PresentsRootSCEA`.
-- Render the first **non-black** legal/loading frame (textures/fonts on the no-VP UI path).
+- Fix the lwcond/file-worker completion wake so `initApp`/`MainLoop` stop dropping script frames.
+- Then load `boot.adc` / `PresentsRootSCEA` and render the first **non-black** legal frame with `GT6_BRINGUP_DDS=0`.
 - Then menus, audio/input, performance; in-engine PAMF playback is a separate clean-room HLE task.
 
 The RPCS3 oracle (`docs/analysis/rpcs3-oracle.md`) confirms the v1.00 disc alone reaches the legal/loading screen, first-run UI and intro; `Prototypes.adc` is a native loader/path artifact, not a missing game file.
