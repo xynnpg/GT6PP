@@ -18,7 +18,7 @@ No emulator. No RPCS3. Just the game as a real x86-64 executable.
 
 ## Why this exists
 
-Gran Turismo 6 is one of the best racing games ever made. RPCS3 already runs it well, but **static recompilation** is a different beast:
+Gran Turismo 6 is one of the best racing games ever made. RPCS3 already runs it well, but **static recompilation** is a different approach:
 
 | | RPCS3 (emulator) | GT6PP (static recomp) |
 |---|---|---|
