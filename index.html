@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>GT6PP — Gran Turismo 6, statically recompiled</title>
+  <meta name="description" content="Experimental static recompilation of Gran Turismo 6 (PS3) to native Windows. No emulator at runtime." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #070707;
+      --surface: #111111;
+      --border: #222;
+      --text: #f2f2f2;
+      --muted: #8a8a8a;
+      --gt-red: #c8102e;
+      --gt-red-dim: #8a0b1f;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Archivo", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.55;
+      font-size: 17px;
+      -webkit-font-smoothing: antialiased;
+      text-align: center;
+    }
+
+    .wrap {
+      max-width: 640px;
+      margin: 0 auto;
+      padding: 0 1.5rem;
+    }
+
+    header {
+      padding: 6rem 0 5rem;
+    }
+
+    h1 {
+      font-size: clamp(3rem, 9vw, 4.2rem);
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      line-height: 1;
+      margin-bottom: 1.15rem;
+    }
+
+    .lead {
+      font-size: 1.15rem;
+      color: var(--muted);
+      max-width: 28ch;
+      margin: 0 auto 2.4rem;
+      line-height: 1.5;
+    }
+
+    .actions {
+      display: flex;
+      gap: 1.4rem;
+      justify-content: center;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .btn {
+      display: inline-block;
+      background: var(--gt-red);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.95rem;
+      padding: 0.75rem 1.5rem;
+      text-decoration: none;
+      border-radius: 2px;
+      transition: background 0.15s;
+    }
+    .btn:hover { background: #e01235; }
+
+    .link {
+      color: var(--muted);
+      font-size: 0.95rem;
+      text-decoration: none;
+      border-bottom: 1px solid #333;
+      padding-bottom: 1px;
+    }
+    .link:hover { color: var(--text); border-color: var(--muted); }
+
+    section {
+      padding: 3.8rem 0;
+      border-top: 1px solid var(--border);
+    }
+
+    h2 {
+      font-size: 1.05rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 1.5rem;
+    }
+
+    p {
+      color: var(--muted);
+      margin-bottom: 1rem;
+      max-width: 42ch;
+      margin-left: auto;
+      margin-right: auto;
+    }
+
+    .status {
+      list-style: none;
+      display: inline-block;
+      text-align: left;
+      margin-top: 0.5rem;
+    }
+    .status li {
+      display: grid;
+      grid-template-columns: 1.1rem 1fr;
+      gap: 0.9rem;
+      padding: 0.38rem 0;
+      color: var(--muted);
+      font-size: 0.98rem;
+    }
+    .status .ok::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--gt-red);
+      margin-top: 0.55rem;
+    }
+    .status .wip::before {
+      content: "";
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #333;
+      margin-top: 0.55rem;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin-top: 0.5rem;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.95rem;
+      text-align: left;
+    }
+    th {
+      font-weight: 500;
+      color: var(--muted);
+      padding: 0.65rem 0.8rem 0.65rem 0;
+      border-bottom: 1px solid var(--border);
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+    td {
+      padding: 0.85rem 0.8rem 0.85rem 0;
+      border-bottom: 1px solid var(--border);
+      color: var(--muted);
+      vertical-align: top;
+    }
+    td:first-child {
+      color: var(--text);
+      font-weight: 500;
+      width: 30%;
+    }
+
+    .note {
+      border-left: 3px solid var(--gt-red-dim);
+      padding: 0.9rem 0 0.9rem 1.25rem;
+      color: var(--muted);
+      font-size: 0.95rem;
+      max-width: 40ch;
+      margin: 0 auto;
+      text-align: left;
+    }
+
+    footer {
+      padding: 3.5rem 0 4.5rem;
+      border-top: 1px solid var(--border);
+      font-size: 0.88rem;
+      color: var(--muted);
+    }
+    footer a {
+      color: var(--muted);
+      text-decoration: none;
+    }
+    footer a:hover { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>GT6PP</h1>
+      <p class="lead">
+        Gran Turismo 6, statically recompiled for native Windows.<br>
+        No emulator. Pure x86-64.
+      </p>
+      <div class="actions">
+        <a class="btn" href="https://github.com/xynnpg/GT6PP">View on GitHub</a>
+        <a class="link" href="https://github.com/xynnpg/GT6PP#readme">Technical README →</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>What this is</h2>
+      <p>
+        An experimental static recompilation of the PlayStation 3 version of
+        <em>Gran Turismo 6</em> (BCUS98296). The game’s PPU code is translated
+        ahead of time into C++ and built as a regular Windows executable.
+      </p>
+      <p>
+        This is not an emulator. There is no runtime interpretation of PS3
+        instructions. The long-term goal is a true native port.
+      </p>
+    </section>
+
+    <section>
+      <h2>Where it stands</h2>
+      <ul class="status">
+        <li class="ok">Boots and reaches the legal / first-run path</li>
+        <li class="ok">Full ADCH boot script parsed (857 KB)</li>
+        <li class="ok">UI packages and menu scripts load</li>
+        <li class="ok">D3D12 present path reaches the screen</li>
+        <li class="wip">First visible frame still in progress</li>
+        <li class="wip">Far from playable</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Static recomp vs emulator</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th></th>
+              <th>GT6PP</th>
+              <th>RPCS3</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Approach</td>
+              <td>Static recompilation</td>
+              <td>Dynamic recompilation</td>
+            </tr>
+            <tr>
+              <td>Runtime</td>
+              <td>Native x86-64 binary</td>
+              <td>Emulator process</td>
+            </tr>
+            <tr>
+              <td>Current state</td>
+              <td>Early bring-up</td>
+              <td>Playable with issues</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section>
+      <h2>Legal</h2>
+      <div class="note">
+        This repository contains no game assets or copyrighted material from
+        Gran Turismo 6. You must supply your own legally obtained disc files.
+        Unofficial research project. Not affiliated with Sony or Polyphony Digital.
+      </div>
+    </section>
+
+    <section>
+      <h2>Contribute</h2>
+      <p>
+        Still very early. Experience with PS3 reverse engineering, static
+        recompilation, D3D12, or the GT engine is useful. Issues and discussion
+        are open on the repository.
+      </p>
+      <div class="actions" style="margin-top: 1.75rem;">
+        <a class="btn" href="https://github.com/xynnpg/GT6PP">GitHub Repository</a>
+      </div>
+    </section>
+
+    <footer>
+      <p>
+        GT6PP · <a href="https://github.com/xynnpg">@xynnpg</a><br>
+        <a href="https://github.com/xynnpg/GT6PP">github.com/xynnpg/GT6PP</a>
+      </p>
+    </footer>
+  </div>
+</body>
+</html>
