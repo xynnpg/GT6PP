@@ -137,7 +137,8 @@ on SET_BEGIN_END(prim != 0):
     imm[imm_n].x = vertex_data4f[0][0];   /* current ATTR0 */
     imm[imm_n].y = vertex_data4f[0][1];
     imm[imm_n].z = 0.0f;                  /* DATA2F folds (x,y,0,1) */
-    imm[imm_n].argb = 0;                  /* scratch path: unused; colour is const attr3 */
+    imm[imm_n].argb = 0;                  /* public API: 0 = opaque white;
+                                           * the scratch path uses const attr3 */
     imm_n++;
 
 on SET_BEGIN_END(0):
@@ -239,7 +240,8 @@ When the next visible draw appears, the first checks are:
    texture0 / attr8 enable. `tex0 ... bound=1 atlas=0` with `vp_ucode=0` means
    a generic texture is bound but the no-VP legacy path can only sample the
    dbgfont atlas; that draw needs the VP/FP path (or a future generic legacy
-   textured PSO).
+   textured PSO). The backend prints
+   `[DRAWDIAG] generic texture bound but no VP` for that case.
 2. `[LEGACYVTX]` shows the expected colour/UV, or `vp_ucode>0` routes the draw
    through the VP path.
 3. `[DRAWDIAG]` c0..c3 match the guest MVP (zero c0..c3 means the guest itself
@@ -416,8 +418,10 @@ guest draw still produces nothing:
 9. `d3d12_draw_arrays` still requires attribute 0 for normal draws. The
    accumulator's reserved scratch range `0x0FF00000..+64 KiB` is detected and
    routed through the immediate path; the scratch carries only attr0, so the
-   constant attr3 colour is used and per-vertex colour/UV require the direct
-   `rsx_d3d12_backend_draw_immediate()` API.
+   constant attr3 colour is used. The public
+   `rsx_d3d12_backend_draw_immediate()` API carries per-vertex colour but no
+   UV; a textured immediate strip would require an extended vertex struct and
+   sampling PSO.
 
 ## Files
 

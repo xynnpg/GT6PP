@@ -1,5 +1,12 @@
 # `Prototypes.adc` / `HOTREAD8` blocker - independent check
 
+> **Oracle correction (later, see `rpcs3-oracle.md`):** the v1.00 disc alone
+> reaches the legal/loading screen, first-run UI, intro and Player Name screen in
+> RPCS3, and **never loads `Prototypes.adc`**. The engine consumes
+> `Prototypes.mwidget` (MPRJ). The native request for `.adc` is a loader/path
+> artifact, not a missing game asset. The "official update required" conclusion
+> below is superseded; do not source or fabricate the file.
+
 **Date:** 2026-10-31
 **Checker scope:** read-only. No source edits, no build, no `gt6.exe` run by this
 check. Evidence is GT.VOL/TOC data, the extracted tree, `work/` logs, and static

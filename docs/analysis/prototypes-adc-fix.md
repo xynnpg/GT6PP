@@ -1,5 +1,11 @@
 # `Prototypes.adc`: producer, `loadPrototype` path, and the `HOTREAD8` spin
 
+> **Oracle correction (later, see `rpcs3-oracle.md`):** v1.00 alone reaches the
+> legal/loading screen, first-run UI, intro and Player Name screen in RPCS3, and
+> never loads `Prototypes.adc`. The engine consumes `Prototypes.mwidget`
+> (MPRJ); the native `.adc` request is a loader/path artifact, not a missing
+> game asset. Do not source or fabricate it.
+
 **Date:** 2026-10-31
 **Scope:** GT6 US `BCUS98296` v1.00, `work/bin/EMAIN.elf`, extracted
 `work/gt6_vol`, and the measured runs `work/pfstrace.err`,

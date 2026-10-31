@@ -66,13 +66,15 @@ you supply. It is not used on the v1.00 disc. After extracting
   not used here. The official GT6 update/patch volume is the legitimate source
   of the missing `Prototypes.adc`.
 
-## Missing game-data dependency
+## `Prototypes.adc` correction
 
-`products/gt6/script/Prototypes.adc` is an offline-compiled ADCH companion that
-ships with the official GT6 update, not the v1.00 disc. If you have the update,
-install the extracted file with:
+The RPCS3 oracle (`docs/analysis/rpcs3-oracle.md`) shows the **v1.00 disc alone**
+reaches the legal/loading screen, first-run display setup, epilepsy warning,
+intro movie and Player Name screen. It loads the same cursor assets as the
+native port and **never loads `Prototypes.adc`**. The v1.00 engine consumes
+`Prototypes.mwidget` (MPRJ); the native port's request for `Prototypes.adc` is a
+loader/path artifact. Do not source or fabricate it. Fix the native
+`loadPrototype`/MPRJ path instead.
 
-```powershell
-python tools\gt6_install_companion_script.py --source <path>\Prototypes.adc --dry-run
-python tools\gt6_install_companion_script.py --source <path>\Prototypes.adc
-```
+The companion installer remains only for a genuine official-update file you
+already own; it is not required for v1.00.

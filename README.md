@@ -2,8 +2,8 @@
 
 Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. The game runs as a native x86-64 executable — no emulator at runtime.
 
-**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads UI scripts, and presents a 1280×720 window. **First real guest draw submitted** (`draws: 1`) — it is a full-screen black fade/cover, so the visible frame is still black.
-**Next blocker:** `0x9F44D8` null vcall → K/W2 cache read → next UI draw.
+**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads the UI scripts and `K/W2` (`CursorProject.gpb`), and presents a 1280×720 window. **First real guest draw submitted** (`draws: 1`) — it is a full-screen black cover, so the visible frame is still black.
+**Next blocker:** `K/W2` is opened and allocated to the correct raw size (`59,991 B`) but **never read**; the cache stays zero. Trace `0xA08ED0` (`StartRead`) → `0xA40FBC` (`cache_read`). `Prototypes.adc` is **not** required on v1.00 — the RPCS3 oracle proves the disc reaches the first-run UI without it.
 
 ![GT6PP bring-up status](docs/progress.png)
 
@@ -56,9 +56,11 @@ The relift pipeline (`scripts/relift-gt6.ps1`) regenerates `gt6/generated/`.
 
 ## Next up
 
-- Generate or serve `Prototypes.adc` so the UI compiler leaves its null-value loop.
-- Submit and render the first `DRAW_ARRAYS` through the D3D12 backend.
+- Fix the `K/W2` `StartRead` path so the raw cache fills and the cursor UI runs.
+- Render the first **non-black** UI draw through D3D12.
 - Then textures/fonts, menus, audio/input, performance.
+
+The RPCS3 oracle (`docs/analysis/rpcs3-oracle.md`) confirms the v1.00 disc alone reaches the legal/loading screen, first-run UI and intro; `Prototypes.adc` is a native loader/path artifact, not a missing game file.
 
 ## Legal
 

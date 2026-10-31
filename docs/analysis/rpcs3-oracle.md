@@ -9,25 +9,31 @@ firmware 4.50, AMD Ryzen 5 5600 / RX 6650 XT.
 
 ## 0. Short answer
 
-- The v1.00 US disc (`BCUS98296`, `APP_VER=01.00`) **does boot in RPCS3 to a
-  real GT6 loading/legal screen** (1280x720, "GRAN TURISMO 6 / © 2013 Sony
-  Computer Entertainment Inc." plus the Polyphony Digital logo and legal
-  text). It does **not** reach the menu in the oracle runs below; it stops in
-  RPCS3's PPU/SPU compilation, HDD game-data install, or a Vulkan swapchain
-  failure.
-- RPCS3 does **not** create or load `products/gt6/script/Prototypes.adc`.
-  The file is not in GT.VOL, not in the extracted tree, and not in the
-  PDIPFS key map. The game's own boot asks for it only after
-  `MenuClassDefine.adc` / `Prototypes.mwidget` / `cursor.mproject` /
-  `cursor.adc` (native trace, see `docs/analysis/CONTINUE-HERE.md` and
-  `docs/analysis/prototypes-adc-check.md`).
-- The v1.00 disc cannot supply `Prototypes.adc`; it supplies only
-  `Prototypes.mwidget`, whose magic is `MPRJ`, not `ADCH`. A fabricated ADCH
-  cannot substitute for the real prototype registrations.
-- **Verdict:** the disc alone reaches a GT6 loading image in RPCS3, and
-  `Prototypes.adc` is a real functional dependency of the v1.00 UI script
-  path. It is not produced by the disc or by RPCS3. The official GT6 update is
-  the legitimate source.
+- The v1.00 US disc (`BCUS98296`, `APP_VER=01.00`) **does boot in RPCS3 with no
+  official update installed**. It reaches the GT6 legal/loading screen, the
+  first-run display-area screen, the epilepsy warning, the intro movie, and the
+  **Player Name (first-run profile) screen**. It then writes a real GT6 save
+  (`BCJS37016-GAME6`, files `GT6.0`…`GT6.5`) and exits/restarts.
+- The real game loads the same cursor-UI assets the native port logs:
+  `MenuClassDefine.adc` (PDIPFS key `K/WO`), `Prototypes.mwidget` (`K/6I`),
+  `cursor.mproject` (`K/JH`), `cursor.adc` (`K/7E`), and
+  `CursorProject.gpb` (`K/W2`). **It does not load any `Prototypes.adc`.**
+  There is no TOC/keymap entry for it, and no such file appears in the
+  emulated HDD before or after the save.
+- `Prototypes.adc` is genuinely absent from the v1.00 disc, but the oracle
+  shows it is **not required for the v1.00 cursor/first-run UI**. The real
+  engine consumes `Prototypes.mwidget` (MPRJ) and continues. The native port's
+  request for `products/gt6/script/Prototypes.adc` is therefore a loader/path
+  artifact (it appends `.adc` to the prototype name), not a missing disc asset.
+- **Verdict:** the v1.00 disc alone reaches the first-run game UI and saves in
+  RPCS3. `Prototypes.adc` is **not** a boot/cursor-UI requirement on the real
+  v1.00 disc; sourcing it from the update would mask a native loader bug. Fix
+  the native `loadPrototype`/MPRJ path instead of requiring the update file.
+
+This contradicts the earlier "update-only, required" conclusion in
+`docs/TOOLING.md` and `docs/analysis/prototypes-adc-check.md`. The oracle
+evidence is below; those documents should be corrected before the next fix
+cycle.
 
 ## 1. How the oracle was run (without touching the user's config)
 
@@ -64,46 +70,30 @@ The `Log:` map in the copy enabled `cellFs`, `sys_fs`, `cellGame`,
 The GUI log-level setting in `GuiConfigs/CurrentSettings.ini` only filters the
 on-screen log. The file log uses the per-channel `Log:` map; trace lines appear
 in the file even with the GUI at "Notice". The original
-`CurrentSettings.ini` was backed up and is restored at the end of the session
-(see §8).
+`CurrentSettings.ini`/`persistent_settings.dat` were backed up and are restored
+at the end of the session (see §8).
 
 ## 2. Boot sequence observed
 
-### 2.1 RPCS3's own progress screens (not game content)
+### 2.1 RPCS3 progress screens over the game's first frame
 
-The first 3–5 minutes are RPCS3 compiling the game:
+The first cold boot spends several minutes compiling PPU/SPU code. These
+overlays are RPCS3's, drawn over the game's legal/copyright screen:
 
 ```text
 Building SPU Cache...   Progress: module 4952 of 10933
 Linking PPU Modules...  Progress: module 0 of 1
 Applying PPU Code...    Progress: module 160 of 160 (4m remaining)
-Precompiling shader interpreter variants... Building base variant 2736 of 6650
 ```
 
-These overlays are drawn **over the game's first frame**, which is already the
-GT6 legal/copyright screen. `work/rpcs3_oracle/frames_async/frame_010s.png`
-and `frame_020s.png` show the GT6 logo and "© 2013 Sony Computer Entertainment
-Inc." behind the SPU-cache progress bar.
+`work/rpcs3_oracle/frames_async/frame_010s.png` and `frame_020s.png` show the
+GT6 logo and "© 2013 Sony Computer Entertainment Inc." behind the SPU-cache
+progress bar. The legal text is the game's first real frame, not an RPCS3
+screen.
 
-### 2.2 First game loading screen
+### 2.2 HDD game-data creation (do not pre-create the directory)
 
-`work/rpcs3_oracle/frames_hdd_precreated/frame_042s.png` is the first clean
-1280x720 game frame captured (no RPCS3 compile overlay except the game's own
-message box):
-
-- black background;
-- "© 2013 Sony Computer Entertainment Inc." / manufacturers-and-cars legal
-  text;
-- "POLYPHONY DIGITAL" / "Developed by Polyphony Digital Inc.";
-- a game message box: `Insufficient free space on Hard Disk Drive (HDD). At
-  least 32MB required. 0x00000001a [183]`.
-
-That message box is the game reacting to a **failed `cellGameContentPermit`**,
-not to a real host disk shortage.
-
-### 2.3 What created that HDD error
-
-On a clean emulated HDD, the game runs its game-data creation path:
+On a clean emulated HDD the game runs its game-data creation path:
 
 ```text
 cellGame: cellGameDataCheck(type=3, dirName="BCUS98296", ...)
@@ -114,7 +104,7 @@ cellGame: cellGameCreateGameData(): temporary directory
 cellGame: cellGameContentPermit(...)
 ```
 
-If `/dev_hdd0/game/BCUS98296` was pre-created by hand (even with the disc's
+If `/dev_hdd0/game/BCUS98296` is pre-created by hand (even with the disc's
 `game/BCUS98296` tree copied in), RPCS3's permit step fails:
 
 ```text
@@ -122,16 +112,17 @@ cellGame: cellGameContentPermit(): failed to initialize directory
          '/dev_hdd0/game/BCUS98296' (Already exists)
 ```
 
-The game then displays the "Insufficient free space" dialog above. This is an
-oracle-setup trap: **do not pre-create the game-data directory**. Let the game
-create `_GDATA_*` and rename it itself.
+The game then displays `Insufficient free space on Hard Disk Drive (HDD). At
+least 32MB required. 0x00000001a [183]` over the legal screen
+(`work/rpcs3_oracle/frames_hdd_precreated/frame_042s.png`). This is an
+oracle-setup trap, not a real host disk shortage: **let the game create
+`_GDATA_*` and rename it to `BCUS98296` itself.**
 
-After a clean run, `/dev_hdd0/game/BCUS98296` contains a valid `PARAM.SFO`,
-`ICON0.PNG`, and the PDIPFS cache the game installed from `GT.VOL`
-(`USRDIR/PDIPFS/K/*`, `USRDIR/PDIPFS_bdmark/K/*`, `USRDIR/db/userdb0101.dat`,
-`USRDIR/grim2/*`). That is the v1.00 game-data install, not an update.
+After a clean run, `dev_hdd0/game/BCUS98296` contains a valid `PARAM.SFO`,
+`ICON0.PNG`, the installed PDIPFS cache, `USRDIR/db/userdb0101.dat`, and
+`USRDIR/grim2/*`. That is the v1.00 game-data install, not an update.
 
-### 2.4 Emulator failures that stop the oracle
+### 2.3 Emulator failures that stop some runs
 
 Two RPCS3-side failures were reproduced:
 
@@ -143,7 +134,7 @@ Two RPCS3-side failures were reproduced:
         Resizing the game window failed. (VKPresent.cpp:489)
    ```
 
-2. **_gcm_intr_thread** access violation during the PPU-apply phase:
+2. **_gcm_intr_thread** access violation during PPU apply:
 
    ```text
    PPU[0x1000002] Thread (_gcm_intr_thread) [0x00b7ba80]:
@@ -153,31 +144,45 @@ Two RPCS3-side failures were reproduced:
      0x00000000 at 0x0
    ```
 
-These are RPCS3 emulator problems. They are not evidence that the disc is
-missing a boot asset. The game reached the legal loading screen and the HDD
-install path in both cases.
+Vulkan **fullscreen** avoids the resize failure. The successful first-run run
+used `--no-gui --fullscreen` and RPCS3's default keyboard pad handler.
 
-## 3. `Prototypes.adc`: what the disc actually contains
+## 3. The real cursor/first-run asset sequence
 
-Independent checks (read-only, no PD Tools):
-
-```text
-GT.VOL: 14.349 GB, 32,591 entries (work/gt6_volume_entries.txt,
-work/gt6_pfs_keymap.tsv)
-```
-
-Relevant TOC rows:
+GT6 does not open each virtual asset by name through `cellFs`; it opens the
+single volume once:
 
 ```text
-K/WO  products/gt6/script/MenuClassDefine.adc   Compressed  FileIndex 34
-K/6I  products/gt6/script/Prototypes.mwidget    Compressed  FileIndex 35
-K/7E  projects/gt6/cursor/cursor.adc            Compressed  FileIndex 57
-K/W2  projects/gt6/cursor/gpb/CursorProject.gpb Compressed  FileIndex 58
-K/CF  projects/gt6/cursor/gpb/CursorProjectComponent.gpb
+sys_fs_open(path="/dev_bdvd/PS3_GAME/USRDIR/GT.VOL", flags=00, ...)
+sys_fs_open(): fd=3, Regular file, ... 14.349GB ...
 ```
 
-There is **no row** for `Prototypes.adc`, no case variant, and no alternate
-key. `work/gt6_vol/products/gt6/script/` contains exactly:
+and then reads through its own PDI/PDIPFS layer. Individual TOC paths never
+appear in `RPCS3.log`, so the proof of what was loaded is the **PDIPFS cache
+that the game writes to the emulated HDD**. After the successful Player Name
+run, these files exist under
+`tools/RPCS3/dev_hdd0/game/BCUS98296/USRDIR/PDIPFS/`:
+
+| Key | Compressed cache size | TOC path (from `work/gt6_pfs_keymap.tsv`) |
+|---|---:|---|
+| `K/WO` | 3,620 | `products/gt6/script/MenuClassDefine.adc` (12,464 uncompressed) |
+| `K/6I` | 1,408 | `products/gt6/script/Prototypes.mwidget` (5,827 uncompressed) |
+| `K/JH` | 6,258 | `projects/gt6/cursor/cursor.mproject` (46,637 uncompressed) |
+| `K/7E` | 13,205 | `projects/gt6/cursor/cursor.adc` (40,290 uncompressed) |
+| `K/W2` | 59,991 | `projects/gt6/cursor/gpb/CursorProject.gpb` (239,744 uncompressed) |
+
+This is exactly the native port's logged sequence up to `CursorProject.gpb`.
+There is **no `Prototypes.adc` key, file, or TOC row**. The real game then
+rendered the Player Name screen and saved; it did not ask for a compiled
+`Prototypes` script.
+
+The keymap has 32,591 entries and only `K/6I` for `Prototypes`:
+
+```text
+K/6I  products/gt6/script/Prototypes.mwidget  Compressed  35  5217  580  16C3  AAF000
+```
+
+`work/gt6_vol/products/gt6/script/` contains exactly:
 
 ```text
 12,464  MenuClassDefine.adc
@@ -194,73 +199,85 @@ CursorProject.gpb     33 62 70 67 00 00 00 00   GPB container
 ```
 
 `MenuClassDefine.adc` contains the literal strings `loadPrototype`,
-`Prototypes`, `prototypes`, and `registerPrimitives`. That matches the native
-trace's request for `products/gt6/script/Prototypes.adc` and the later null
-read. `Prototypes.mwidget` is an MPRJ project; the ADCH parser rejects it
-because its first four bytes are not `ADCH`.
+`Prototypes`, `prototypes`, and `registerPrimitives`. `Prototypes.mwidget` is
+an MPRJ project; the ADCH parser rejects it because its first four bytes are
+not `ADCH`. The real v1.00 engine clearly handles that MPRJ and does not need a
+separate `Prototypes.adc` for the cursor/first-run UI.
 
-## 4. Why the RPCS3 log does not show `Prototypes.adc`
+## 4. What this means for `Prototypes.adc`
 
-GT6 does not open each virtual asset by name through `cellFs`. It opens the
-single volume once:
+The earlier analysis established two facts correctly:
 
-```text
-sys_fs_open(path="/dev_bdvd/PS3_GAME/USRDIR/GT.VOL", flags=00, ...)
-sys_fs_open(): fd=3, Regular file, ... 14.349GB ...
-```
+1. `Prototypes.adc` is absent from GT.VOL.
+2. `MenuClassDefine.adc` references `loadPrototype("Prototypes")` and then
+   `registerPrimitives(prototypes)`.
 
-and then reads via its own PDI/PDIPFS layer. Individual TOC paths
-(`MenuClassDefine.adc`, `Prototypes.mwidget`, `cursor.adc`, …) never appear in
-RPCS3's `sys_fs` log. Therefore "no `Prototypes.adc` line in RPCS3.log" is
-expected and is **not** proof of absence. The proof is the GT.VOL TOC and the
-PDIPFS key map: there is no entry to request.
+The missing step was the oracle check: **does the real v1.00 engine actually
+request a `.adc` for that call?** The RPCS3 run says no:
 
-The installed `dev_hdd0/game/BCUS98296` was also searched for `*.adc`,
-`Prototypes*`, `CursorProject*`, and `MenuClass*` after the install. Nothing was
-created. The game does not compile a missing ADCH on first boot in this oracle.
+- It loaded `Prototypes.mwidget` (`K/6I`), `cursor.mproject` (`K/JH`),
+  `cursor.adc` (`K/7E`), and `CursorProject.gpb` (`K/W2`).
+- It rendered the GT6 Player Name screen (a real cursor/UI screen) and wrote
+  `cellSaveDataAutoSave2(dirName="BCJS37016-GAME6", ...)` with `GT6.0`…`GT6.5`,
+  `ICON0.PNG`, and `PIC1.PNG`.
+- It never wrote or read a `Prototypes.adc` cache key/file.
+
+Therefore the native port's `/products/gt6/script/Prototypes.adc` open is not
+faithful to v1.00. The likely bug is in the native `loadPrototype` path
+extension: the real engine resolves the prototype project to
+`Prototypes.mwidget` (MPRJ) and/or the shared `Prototype.gpb`, while the native
+loader appends `.adc` and expects an ADCH. A real ADCH from the update would
+make the native port advance, but it would **mask** the loader bug and would
+not reproduce the v1.00 data flow.
+
+Caveat: this oracle proves the cursor/first-run path, not every later menu.
+A later code path could still use an update-provided ADCH. But the v1.00 boot
+and cursor UI demonstrably do not require it.
 
 ## 5. Does RPCS3 show the GT6 menu with the v1.00 disc alone?
 
-Not in these runs. What it does show:
+It reaches the **first-run player/profile UI** and saves. The main menu was not
+observed in the 240 s input run: the game saved and exited/restarted at
+`0:01:35` (`_sys_process_exit(status=0)`), which is consistent with a normal
+first-run restart. A follow-up boot with the save present is recorded in §7.
 
 | Stage | Result | Evidence |
 |---|---|---|
 | Disc mount / EBOOT boot | PASS | `SYS: Title: Gran Turismor6`, `Serial: BCUS98296`, `APP_VER=01.00` |
-| First game pixels | PASS | GT6 legal/copyright screen, 1280x720 (`frames_async/frame_010s.png`, `frame_020s.png`) |
-| HDD game-data creation | PASS (clean HDD) | `cellGameCreateGameData` → `_GDATA_*` → `PARAM.SFO`, `ICON0.PNG`, `PDIPFS` |
-| Menu | NOT REACHED | RPCS3 swapchain / `_gcm_intr_thread` failures during PPU apply and install |
-
-A fullscreen Vulkan run was also attempted (`run_fs.ps1`, `config_vk_fs.yml`)
-to avoid the resize failure. Its result is recorded in §7. Even if that run
-reaches the menu, nothing in the v1.00 disc can supply `Prototypes.adc`; the
-file has no TOC entry.
+| First game pixels | PASS | GT6 legal/copyright screen, 1280x720 (`frames_async/frame_010s.png`) |
+| Display area | PASS | `fs_printwindow.png` ("Adjust Display Area") |
+| Epilepsy warning | PASS | `frames_input/frame_030s.png` |
+| Intro movie | PASS | `frames_input/frame_045s.png` |
+| Player Name UI | PASS | `frames_input/frame_075s.png` |
+| Save data | PASS | `cellSaveDataAutoSave2`, `dev_hdd0/home/00000001/savedata/BCJS37016-GAME6/GT6.0…5` |
+| Cursor assets | PASS | PDIPFS cache `K/WO`, `K/6I`, `K/JH`, `K/7E`, `K/W2` |
+| `Prototypes.adc` | NOT PRESENT / NOT LOADED | no TOC row, no cache key, no file |
 
 ## 6. What the native port should copy
 
-1. **Do not fabricate `Prototypes.adc`.** The MPRJ header is not ADCH, and a
-   synthesized ADCH would not contain the real prototype registrations.
-   `MenuClassDefine.adc` calls `loadPrototype("Prototypes")` and then
-   `registerPrimitives(prototypes)`; a fake file only moves the failure.
-2. **Keep the v1.00 PDIPFS/GT.VOL path as the source of truth for TOC-backed
-   assets.** The disc's `MenuClassDefine.adc`, `Prototypes.mwidget`,
-   `cursor.mproject`, `cursor.adc`, and `CursorProject.gpb` are all present and
-   must be served exactly. The native port's extracted-tree override is
-   equivalent for those files.
-3. **Treat `Prototypes.adc` as an update-only asset.** The official GT6 update
-   is the legitimate source; install the real ADCH with
-   `tools/gt6_install_companion_script.py` after extracting it from the update
-   PKG.
+1. **Do not require or fabricate `Prototypes.adc` for the v1.00 boot/cursor
+   path.** The real game reaches the Player Name screen without it.
+2. **Fix the prototype loader.** Match the real sequence: serve
+   `MenuClassDefine.adc` (`K/WO`), `Prototypes.mwidget` (`K/6I`),
+   `cursor.mproject` (`K/JH`), `cursor.adc` (`K/7E`), and
+   `CursorProject.gpb` (`K/W2`), and make `loadPrototype("Prototypes")` use the
+   MPRJ/prototype project instead of appending `.adc`.
+3. **Keep the v1.00 PDIPFS/GT.VOL path as the source of truth for TOC-backed
+   assets.** The disc supplies every asset the real first-run flow used.
 4. **Do not pre-create the RPCS3 game-data directory** when reproducing this
-   oracle; let `cellGameCreateGameData` / `cellGameContentPermit` do it. This
-   avoids the "Already exists" → "Insufficient free space" false error.
-5. **For oracle screenshots, prefer RPCS3's F12 capture** (saved under
-   `tools/RPCS3/screenshots/BCUS98296/`) once the game is past PPU apply. Native
-   window captures (`PrintWindow`) are affected by occlusion, minimization, and
-   Vulkan swapchain resizes.
+   oracle; let `cellGameCreateGameData`/`cellGameContentPermit` do it.
+5. **Use fullscreen Vulkan for oracle screenshots.** Windowed mode hits the
+   swapchain resize failure when the window is minimized/occluded. F12 saves to
+   `tools/RPCS3/screenshots/BCUS98296/`; `PrintWindow` also works for the
+   fullscreen window.
+6. If the official update is installed later, treat its `Prototypes.adc` as an
+   **optional later-path asset**, not as the fix for the v1.00 cursor spin.
 
-## 7. Fullscreen run result
+## 7. Fullscreen and input runs
 
-`work/rpcs3_oracle/run_fs.ps1` boots with:
+### 7.1 Display-area run (no confirm input)
+
+`work/rpcs3_oracle/run_fs.ps1`:
 
 ```powershell
 tools\RPCS3\rpcs3.exe --no-gui --fullscreen `
@@ -268,36 +285,39 @@ tools\RPCS3\rpcs3.exe --no-gui --fullscreen `
   "PS3-Version\Gran Turismo 6 (USA) (En,Ja,Fr)"
 ```
 
-Vulkan fullscreen avoided the window-resize crash. The run reached 60 FPS after
-the PPU/SPU caches were warm and displayed the **"Adjust Display Area"**
-first-run screen at 1920x1080. That screen is game/system content, not an RPCS3
-overlay:
-
-- `work/rpcs3_oracle/fs_printwindow.png` — four corner marks, "Press the up
-  and down buttons to move the four marks so that they sit exactly in the four
-  corners of the screen", "When you've finished your adjustment, press the X
-  button".
-
-RPCS3's default input path is active even when `Keyboard: "Null"` is set in
-`config.yml`:
+Warm caches reached 60 FPS in ~20 s and displayed "Adjust Display Area"
+(1920x1080). RPCS3's default input path is active even with
+`Keyboard: "Null"` in `config.yml`:
 
 ```text
 Input: Input configuration empty. Adding default keyboard pad handler
 Input: Pad 0: device='Keyboard', handler=Keyboard, VID=0x0, PID=0x0
 ```
 
-The fullscreen run was stopped without sending the X/confirm input, so it did
-not advance past this screen. `work/rpcs3_oracle/run_input.ps1` repeats the
-boot with a keyboard input schedule (X at t=24/33/45/63/90 s, Enter at
-t=54/75 s) and captures before/after frames under
-`work/rpcs3_oracle/frames_input/`.
+The run was stopped without X/confirm, so it stayed on that screen.
 
-Timeline and log: `work/rpcs3_oracle/run_fs.timeline.txt`,
-`work/rpcs3_oracle/rpcs3_fullscreen.log`.
+### 7.2 Input run: X/Enter through first-run UI
 
-> The input run did not reach the menu before its 240 s budget; the SPU cache
-> for the next boot phase was still being built (`Building SPU Cache... module
-> 1352 of 12066`). A longer follow-up is recorded below if it completed.
+`work/rpcs3_oracle/run_input.ps1` sent X (Cross) at t=24/33/45/63/90 s and
+Enter (Start) at t=54/75 s. Captures under
+`work/rpcs3_oracle/frames_input/`:
+
+- `frame_030s.png` — epilepsy warning.
+- `frame_045s.png` — intro movie (black-and-white cars on a road).
+- `frame_075s.png` — **Player Name (English Characters)** with First Name /
+  Last Name fields and OK, over the GT6 blue UI. This is the first real cursor
+  UI screen captured.
+- The game then wrote the save at `0:00:53` (`cellSaveDataAutoSave2`) and
+  exited at `0:01:35` (`_sys_process_exit(status=0)`), after `cellKbEnd()` and
+  unloading `libsysutil_oskdialog_ext.sprx`. This looks like the normal
+  first-run save/restart, not a crash.
+
+### 7.3 Follow-up boot with the save present
+
+`work/rpcs3_oracle/run_after.ps1` boots again with the save and sends X at
+t=30/60 s, Enter at t=45 s, capturing under
+`work/rpcs3_oracle/frames_after/`. Its timeline/log are the final check for
+whether the main menu appears without `Prototypes.adc`.
 
 ## 8. Config hygiene
 
@@ -305,14 +325,14 @@ Timeline and log: `work/rpcs3_oracle/run_fs.timeline.txt`,
   `4EAA5686A715A1A6756CEA738F1A942A8C632AFE273B6E6AEB55A9B19A1AADCB`.
 - `tools/RPCS3/config/games.yml` was unchanged
   (`9D3ED4FB140B26FCA18AB626E15828F315D9C4EA8C2A7C4999CEF6B58F7E303D`).
-- `GuiConfigs/CurrentSettings.ini` was backed up to
-  `work/rpcs3_oracle/CurrentSettings.ini.bak` and restored after the runs.
-  RPCS3 rewrites window geometry/visibility on exit, so the restored file is
-  the original backup, not a hand-merged one.
-- All oracle configs and logs are under `work/rpcs3_oracle/`. The only files
-  written under `tools/RPCS3/` are the emulator's own log, its caches, the
-  installed `dev_hdd0/game/BCUS98296` game data, and an empty
-  `screenshots/BCUS98296/` directory.
+- `GuiConfigs/CurrentSettings.ini` and `persistent_settings.dat` were backed up
+  to `work/rpcs3_oracle/*.bak` and restored after the runs. RPCS3 rewrites
+  window geometry/visibility on exit, so the restored file is the original
+  backup, not a hand-merged one.
+- All oracle configs/logs are under `work/rpcs3_oracle/`. The only files
+  written under `tools/RPCS3/` are the emulator's own log, caches, the
+  installed `dev_hdd0/game/BCUS98296` game data, the `BCJS37016-GAME6` save,
+  trophies, and the screenshot directory.
 
 ## 9. Commands used
 
@@ -328,10 +348,14 @@ tools\RPCS3\rpcs3.exe --no-gui `
   "PS3-Version\Gran Turismo 6 (USA) (En,Ja,Fr)"
 
 # 3. Inspect the log
-Select-String work\rpcs3_oracle\rpcs3_async.log `
-  -Pattern 'GT.VOL|cellGameDataCheck|cellGameCreateGameData|cellGameContentPermit|fatal error'
+Select-String work\rpcs3_oracle\rpcs3_input.log `
+  -Pattern 'GT.VOL|cellGameDataCheck|cellSaveData|cellKb|fatal error'
 
 # 4. Verify the missing file independently
 Select-String work\gt6_volume_entries.txt -Pattern 'Prototypes'
 Select-String work\gt6_pfs_keymap.tsv -Pattern 'Prototypes|MenuClassDefine|cursor.adc|CursorProject'
+
+# 5. Verify what the real game actually loaded (after a run)
+Get-ChildItem tools\RPCS3\dev_hdd0\game\BCUS98296\USRDIR\PDIPFS -Recurse -File |
+  Where-Object { $_.FullName -match 'K\\(WO|6I|JH|7E|W2)$' }
 ```
