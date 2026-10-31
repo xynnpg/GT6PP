@@ -1,0 +1,357 @@
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -81,6 +81,9 @@ typedef struct {
+     u32 vertex_count;
+     u32 topology;       /* rsx_topology (NOT a D3D value; see topo_to_d3d) */
+     int textured;       /* 1 = sample the bound font/atlas texture (dbgfont) */
++    int legacy_tex;     /* 1 = no-VP draw samples tex[0] through the generic
++                         * legacy textured PSO (guest GPB/UI image, not the B8
++                         * dbgfont atlas). */
+     int is_vp;          /* 1 = real VP path: vb_byte_offset indexes vp_vb (float4) */
+     int is_immediate;   /* 1 = constant-attribute/immediate vertices: already in
+                          * the host BasicVertex layout, drawn with the
+@@ -331,7 +334,10 @@ typedef struct {
+ 
+     /* Textured pipeline (dbgfont / 2D atlas quads). The font atlas is an 8-bit
+      * coverage texture uploaded as R8_UNORM and sampled in the pixel shader. */
+-    ID3D12PipelineState*  pipeline_state_tex;   /* triangle + texture + blend */
++    ID3D12PipelineState*  pipeline_state_tex;   /* triangle + dbgfont atlas PS */
++    ID3D12PipelineState*  pipeline_state_tex_generic; /* triangle + generic t0
++                                                       * colour sample * vertex
++                                                       * colour (GPB/UI images) */
+     ID3D12DescriptorHeap* srv_heap;             /* shader-visible, 1 SRV slot  */
+     ID3D12Resource*       tex_resource;         /* current atlas texture       */
+     ID3D12Resource*       tex_upload;           /* staging buffer for uploads  */
+@@ -1236,11 +1242,25 @@ static int init_d3d12(u32 width, u32 height)
+                 "  float2 uv2 = float2(i.uv.x*10.0, i.uv.y*8.0 + 0.59);\n"
+                 "  float cov = tex.Sample(smp, uv2).r;\n"
+                 "  return float4(i.col.rgb, i.col.a * cov); }\n";
+-            ID3DBlob *vtb = NULL, *ptb = NULL, *e2 = NULL;
++            /* Generic guest texture (GPB ImageFace / 2D UI art): the guest
++             * supplies normalised UVs and a vertex colour. No dbgfont atlas
++             * scaling and no coverage->alpha reinterpretation -- sample RGBA
++             * and modulate it by the vertex colour (including its alpha, which
++             * carries the plate fade). */
++            static const char ps_tex_generic[] =
++                "Texture2D tex : register(t0);\n"
++                "SamplerState smp : register(s0);\n"
++                "struct PSIn{ float4 pos:SV_POSITION; float4 col:COLOR; float2 uv:TEXCOORD; };\n"
++                "float4 main(PSIn i):SV_TARGET{ return tex.Sample(smp, i.uv) * i.col; }\n";
++
++            ID3DBlob *vtb = NULL, *ptb = NULL, *pgb = NULL, *e2 = NULL;
+             hr = D3DCompile(vs_tex, sizeof(vs_tex) - 1, "vs_tex", NULL, NULL, "main", "vs_5_0", 0, 0, &vtb, &e2);
+             if (FAILED(hr)) printf("[D3D12] VS(tex) compile failed: %s\n", e2 ? (const char*)e2->lpVtbl->GetBufferPointer(e2) : "?");
+             hr = D3DCompile(ps_tex, sizeof(ps_tex) - 1, "ps_tex", NULL, NULL, "main", "ps_5_0", 0, 0, &ptb, &e2);
+             if (FAILED(hr)) printf("[D3D12] PS(tex) compile failed: %s\n", e2 ? (const char*)e2->lpVtbl->GetBufferPointer(e2) : "?");
++            hr = D3DCompile(ps_tex_generic, sizeof(ps_tex_generic) - 1, "ps_tex_generic", NULL, NULL, "main", "ps_5_0", 0, 0, &pgb, &e2);
++            if (FAILED(hr)) printf("[D3D12] PS(tex generic) compile failed: %s\n", e2 ? (const char*)e2->lpVtbl->GetBufferPointer(e2) : "?");
++
+             if (vtb && ptb) {
+                 D3D12_INPUT_ELEMENT_DESC il[] = {
+                     {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
+@@ -1278,8 +1298,46 @@ static int init_d3d12(u32 width, u32 height)
+                 if (SUCCEEDED(hr)) printf("[D3D12] Pipeline state created (textured class)\n");
+                 else printf("[D3D12] PSO TEX creation failed (0x%08lX)\n", hr);
+             }
++            if (vtb && pgb) {
++                D3D12_INPUT_ELEMENT_DESC il[] = {
++                    {"POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
++                    {"COLOR",    0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 12, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
++                    {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 28, D3D12_INPUT_CLASSIFICATION_PER_VERTEX_DATA, 0},
++                };
++                D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {0};
++                pd.pRootSignature = s_d3d.root_signature;
++                pd.VS.pShaderBytecode = vtb->lpVtbl->GetBufferPointer(vtb);
++                pd.VS.BytecodeLength  = vtb->lpVtbl->GetBufferSize(vtb);
++                pd.PS.pShaderBytecode = pgb->lpVtbl->GetBufferPointer(pgb);
++                pd.PS.BytecodeLength  = pgb->lpVtbl->GetBufferSize(pgb);
++                pd.InputLayout.pInputElementDescs = il;
++                pd.InputLayout.NumElements = 3;
++                pd.RasterizerState.FillMode = D3D12_FILL_MODE_SOLID;
++                pd.RasterizerState.CullMode = D3D12_CULL_MODE_NONE;
++                pd.BlendState.RenderTarget[0].BlendEnable    = TRUE;
++                pd.BlendState.RenderTarget[0].SrcBlend       = D3D12_BLEND_SRC_ALPHA;
++                pd.BlendState.RenderTarget[0].DestBlend      = D3D12_BLEND_INV_SRC_ALPHA;
++                pd.BlendState.RenderTarget[0].BlendOp        = D3D12_BLEND_OP_ADD;
++                pd.BlendState.RenderTarget[0].SrcBlendAlpha  = D3D12_BLEND_ONE;
++                pd.BlendState.RenderTarget[0].DestBlendAlpha = D3D12_BLEND_INV_SRC_ALPHA;
++                pd.BlendState.RenderTarget[0].BlendOpAlpha   = D3D12_BLEND_OP_ADD;
++                pd.BlendState.RenderTarget[0].RenderTargetWriteMask = D3D12_COLOR_WRITE_ENABLE_ALL;
++                pd.SampleMask = UINT_MAX;
++                pd.PrimitiveTopologyType = D3D12_PRIMITIVE_TOPOLOGY_TYPE_TRIANGLE;
++                pd.NumRenderTargets = 1;
++                pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
++                pd.DSVFormat = DXGI_FORMAT_D24_UNORM_S8_UINT;
++                pd.DepthStencilState.DepthEnable = FALSE;
++                pd.DepthStencilState.StencilEnable = FALSE;
++                pd.SampleDesc.Count = 1;
++                hr = s_d3d.device->lpVtbl->CreateGraphicsPipelineState(
++                    s_d3d.device, &pd, &IID_ID3D12PipelineState, (void**)&s_d3d.pipeline_state_tex_generic);
++                if (SUCCEEDED(hr)) printf("[D3D12] Pipeline state created (generic textured class)\n");
++                else printf("[D3D12] PSO TEX generic creation failed (0x%08lX)\n", hr);
++            }
+             if (vtb) vtb->lpVtbl->Release(vtb);
+             if (ptb) ptb->lpVtbl->Release(ptb);
++            if (pgb) pgb->lpVtbl->Release(pgb);
+         }
+ 
+         /* -----------------------------------------------------------------
+@@ -4676,6 +4734,35 @@ static void bringup_present(u32 fi)
+     s_d3d.cmd_list->lpVtbl->ResourceBarrier(s_d3d.cmd_list, 1, &gb);
+ }
+ 
++/* Formats the legacy generic textured path can sample: the GPB/UI image classes
++ * (A8R8G8B8 and DXT1/23/45). B8 (0x81) is the dbgfont atlas and keeps its own
++ * coverage PS; G8B8 (0x8B) is LBP's font atlas, not a colour image. */
++static int legacy_generic_tex_format(u32 fmt)
++{
++    const u32 bf = fmt & 0x9F;
++    return bf == 0x85 || (bf >= 0x86 && bf <= 0x88);
++}
++
++static DXGI_FORMAT legacy_generic_tex_dxgi(u32 fmt)
++{
++    switch (fmt & 0x9F) {
++    case 0x85: return DXGI_FORMAT_R8G8B8A8_UNORM;
++    case 0x86: return DXGI_FORMAT_BC1_UNORM;
++    case 0x87: return DXGI_FORMAT_BC2_UNORM;
++    case 0x88: return DXGI_FORMAT_BC3_UNORM;
++    default:   return DXGI_FORMAT_UNKNOWN;
++    }
++}
++
++/* A no-VP draw with a generic guest image bound. The B8 atlas path is excluded:
++ * it has its own PSO, SRV slot and UV convention. */
++static int legacy_generic_tex_bound(void)
++{
++    if (s_d3d.tex_bound) return 0;
++    if (!s_d3d.cur_texs[0].set || !s_d3d.cur_texs[0].off) return 0;
++    return legacy_generic_tex_format(s_d3d.cur_texs[0].fmt);
++}
++
+ static void render_frame(void)
+ {
+     double _rf0 = perf_on() ? perf_now() : 0.0;
+@@ -5182,6 +5269,38 @@ static void render_frame(void)
+         if (perf_on()) s_perf_pso += perf_now() - _ps0;
+     }
+ 
++    /* No-VP textured draws: upload their unit-0 guest image. Each record gets
++     * its own 4-descriptor window at DRAW_SRV_BASE + d*4, so two draws that
++     * sample different textures cannot share a descriptor by accident. This is
++     * the legacy counterpart of the VP upload loop above; it is inert unless a
++     * record has legacy_tex set. */
++    for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
++        D3D12DrawRecord* dr = &s_d3d.draws[_d];
++        if (dr->is_vp || dr->is_clear || !dr->legacy_tex) continue;
++        DXGI_FORMAT sf = legacy_generic_tex_dxgi(dr->tex[0].fmt);
++        int ts = (sf == DXGI_FORMAT_UNKNOWN) ? -1
++               : vp_upload_tex_slot(dr->tex[0].off, dr->tex[0].w, dr->tex[0].h,
++                                    dr->tex[0].fmt, 0, dr->tex[0].mips);
++        if (ts >= 0) {
++            const u32 _bf = dr->tex[0].fmt & 0x9F;
++            dr->tex_slot = ts;
++            srv_write_ex(DRAW_SRV_BASE + _d * 4, s_d3d.vp_tex[ts].res, sf,
++                         rsx_remap_to_d3d(dr->tex[0].ctrl1, _bf), 0);
++            { static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
++                fprintf(stderr, "[LEGACYTEX] op=%u t0=0x%08X fmt=0x%02X %ux%u"
++                                " slot=%d -> generic PSO%c",
++                        _d, dr->tex[0].raw, dr->tex[0].fmt, dr->tex[0].w,
++                        dr->tex[0].h, ts, 10); }
++        } else {
++            dr->tex_slot = -1;
++            { static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
++                fprintf(stderr, "[LEGACYTEX] op=%u t0=0x%08X fmt=0x%02X %ux%u"
++                                " upload FAILED -> untextured%c",
++                        _d, dr->tex[0].raw, dr->tex[0].fmt, dr->tex[0].w,
++                        dr->tex[0].h, 10); }
++        }
++    }
++
+     /* Transition render target to RENDER_TARGET state */
+     D3D12_RESOURCE_BARRIER barrier = {0};
+     barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+@@ -5223,9 +5342,11 @@ static void render_frame(void)
+         s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.root_signature);
+         s_d3d.cmd_list->lpVtbl->IASetVertexBuffers(s_d3d.cmd_list, 0, 1, &s_d3d.vb_view);
+ 
+-        /* Make the atlas SRV heap current and bind its table (t0) for textured
+-         * draws. Safe to set even if no draw is textured. */
+-        if (s_d3d.tex_ready && s_d3d.srv_heap) {
++        /* Make the SRV heap current and bind slot 0 (the atlas) as the default
++         * t0 table. Legacy generic textured draws rebind their own per-draw
++         * window below. The heap must be current even before any atlas upload,
++         * because a GPB image can be the frame's first textured draw. */
++        if (s_d3d.srv_heap) {
+             ID3D12DescriptorHeap* heaps[] = { s_d3d.srv_heap };
+             s_d3d.cmd_list->lpVtbl->SetDescriptorHeaps(s_d3d.cmd_list, 1, heaps);
+             D3D12_GPU_DESCRIPTOR_HANDLE gh;
+@@ -5293,6 +5414,7 @@ static void render_frame(void)
+          * must match the topology or D3D12 rejects the draw. */
+         u32 last_topo = 0xFFFFFFFFu;
+         ID3D12PipelineState* last_pso = NULL;
++        u32 last_srv_slot = 0;   /* slot 0 is bound above as the default table */
+         u32 draws = s_d3d.draw_count;
+         if (draws > MAX_DRAWS) draws = MAX_DRAWS;
+         for (u32 d = 0; d < draws; d++) {
+@@ -5300,16 +5422,23 @@ static void render_frame(void)
+             if (dr->is_vp) continue; /* drawn by the VP pass below */
+ 
+             /* Select PSO: immediate/constant-attribute records use the
+-             * passthrough VS (positions already in clip space); textured
+-             * triangles (dbgfont) use the atlas PSO; otherwise pick by
++             * passthrough VS (positions already in clip space); generic guest
++             * textures (GPB/UI images) use the direct colour-sampling PSO; the
++             * B8 dbgfont atlas keeps its coverage PSO; otherwise pick by
+              * topology class. */
+             ID3D12PipelineState* target_pso = s_d3d.pipeline_state; /* default triangle */
++            u32 want_srv = 0xFFFFFFFFu;
+             if (dr->is_immediate) {
+                 target_pso = s_d3d.pipeline_state_immediate
+                              ? s_d3d.pipeline_state_immediate
+                              : s_d3d.pipeline_state;
++            } else if (dr->legacy_tex && dr->tex_slot >= 0 &&
++                       s_d3d.pipeline_state_tex_generic && s_d3d.srv_heap) {
++                target_pso = s_d3d.pipeline_state_tex_generic;
++                want_srv = DRAW_SRV_BASE + d * 4;
+             } else if (dr->textured && s_d3d.tex_ready && s_d3d.pipeline_state_tex) {
+                 target_pso = s_d3d.pipeline_state_tex;
++                want_srv = 0;
+             } else if (dr->topology == RSX_TOPOLOGY_POINTS) {
+                 target_pso = s_d3d.pipeline_state_points
+                              ? s_d3d.pipeline_state_points : s_d3d.pipeline_state;
+@@ -5322,6 +5451,14 @@ static void render_frame(void)
+                 s_d3d.cmd_list->lpVtbl->SetPipelineState(s_d3d.cmd_list, target_pso);
+                 last_pso = target_pso;
+             }
++            if (want_srv != 0xFFFFFFFFu && want_srv != last_srv_slot) {
++                D3D12_GPU_DESCRIPTOR_HANDLE gh;
++                s_d3d.srv_heap->lpVtbl->GetGPUDescriptorHandleForHeapStart(s_d3d.srv_heap, &gh);
++                gh.ptr += (u64)want_srv * s_d3d.srv_inc;
++                s_d3d.cmd_list->lpVtbl->SetGraphicsRootDescriptorTable(
++                    s_d3d.cmd_list, 1, gh);
++                last_srv_slot = want_srv;
++            }
+             if (dr->topology != last_topo) {
+                 s_d3d.cmd_list->lpVtbl->IASetPrimitiveTopology(s_d3d.cmd_list, topo_to_d3d(dr->topology));
+                 last_topo = dr->topology;
+@@ -6734,6 +6871,33 @@ static void d3d12_set_viewport(void* ud, const rsx_state* state)
+  * + texcoord (uv), 36 bytes. (The real VP path feeds raw float4 attrib0.) */
+ typedef struct { float x, y, z; float r, g, b, a; float u, v; } BasicVertex;
+ 
++/* Snapshot unit 0 on a legacy (no-VP) draw. The legacy fallback used to record
++ * textured=0 and no texture state, so a GPB ImageFace draw reached
++ * render_frame() with no way to know which guest image it sampled. */
++static void legacy_record_texture(D3D12DrawRecord* dr)
++{
++    dr->legacy_tex = 0;
++    dr->tex_slot   = -1;
++    if (!legacy_generic_tex_bound()) return;
++
++    dr->tex[0].off   = s_d3d.cur_texs[0].off;
++    dr->tex[0].raw   = s_d3d.cur_texs[0].raw;
++    dr->tex[0].w     = s_d3d.cur_texs[0].w;
++    dr->tex[0].h     = s_d3d.cur_texs[0].h;
++    dr->tex[0].fmt   = s_d3d.cur_texs[0].fmt;
++    dr->tex[0].ctrl1 = s_d3d.cur_texs[0].ctrl1;
++    dr->tex[0].cube  = s_d3d.cur_texs[0].cube;
++    dr->tex[0].mips  = s_d3d.cur_texs[0].mips;
++    dr->tex[0].addr   = s_d3d.cur_texs[0].addr;
++    dr->tex[0].filter = s_d3d.cur_texs[0].filter;
++    dr->tex[0].ctrl0  = s_d3d.cur_texs[0].ctrl0;
++    dr->tex[0].border = s_d3d.cur_texs[0].border;
++    dr->tex[0].set   = 1;
++    dr->tex_rt[0]    = -1;
++    for (int _u = 1; _u < 4; _u++) { dr->tex[_u].set = 0; dr->tex_rt[_u] = -1; }
++    dr->legacy_tex   = 1;
++}
++
+ /* Read one RSX vertex (by absolute vertex index) from guest memory into our
+  * host layout. Position is attrib 0 (float3+); color is attrib 3 (any RSX
+  * type, or the constant vertex register when the array is disabled); UV is the
+@@ -6781,7 +6945,8 @@ static void read_rsx_vertex(const rsx_state* state, u32 vindex, BasicVertex* out
+          * components are the atlas texcoords, not depth.
+          * TODO: execute the real vertex-program / RSX viewport transform so
+          * this is not needed. */
+-        if (out->x > 2.0f || out->x < -2.0f || out->y > 2.0f || out->y < -2.0f) {
++        if (!legacy_generic_tex_bound() &&
++            (out->x > 2.0f || out->x < -2.0f || out->y > 2.0f || out->y < -2.0f)) {
+             float sx = out->x - floorf(out->x);
+             float sy = out->y - floorf(out->y);
+             out->x = sx * 2.0f - 1.0f;
+@@ -7903,8 +8068,13 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+           if (s_d3d.cur_texs[0].set && !s_d3d.tex_bound && st->vp_ucode_bytes < 16) {
+               static int _w = 0;
+               if (PS3_LOG_FIRST(_w, 4))
+-                  fprintf(stderr, "[DRAWDIAG]  generic texture bound but no VP:"
+-                                  " the legacy path only samples the dbgfont atlas%c", 10);
++                  fprintf(stderr, "[DRAWDIAG]  generic texture bound, no VP:"
++                                  " %s (t0 fmt=0x%02X %ux%u)%c",
++                              legacy_generic_tex_bound()
++                                  ? "legacy generic textured PSO"
++                                  : "format NOT sampleable by the legacy path",
++                              s_d3d.cur_texs[0].fmt, s_d3d.cur_texs[0].w,
++                              s_d3d.cur_texs[0].h, 10);
+           }
+           fprintf(stderr,
+               "[DRAWDIAG]  c0=(%.3f,%.3f,%.3f,%.3f) c1=(%.3f,%.3f,%.3f,%.3f)"
+@@ -8003,14 +8173,16 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+         u32 emitted = upload_quads_from_rsx(first, count);
+         if (emitted == 0) return;
+         if (s_d3d.draw_count < MAX_DRAWS) {
+-            s_d3d.draws[s_d3d.draw_count].vb_byte_offset = record_offset;
+-            s_d3d.draws[s_d3d.draw_count].vertex_count   = emitted;
+-            s_d3d.draws[s_d3d.draw_count].topology       = RSX_TOPOLOGY_TRIANGLES;
+-            s_d3d.draws[s_d3d.draw_count].textured       = s_d3d.tex_bound;
+-            s_d3d.draws[s_d3d.draw_count].is_vp          = 0;
+-            s_d3d.draws[s_d3d.draw_count].is_immediate   = 0;
+-            s_d3d.draws[s_d3d.draw_count].is_clear       = 0;
+-            s_d3d.draws[s_d3d.draw_count].rt_off         = 0;
++            D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
++            dr->vb_byte_offset = record_offset;
++            dr->vertex_count   = emitted;
++            dr->topology       = RSX_TOPOLOGY_TRIANGLES;
++            dr->textured       = s_d3d.tex_bound;
++            dr->is_vp          = 0;
++            dr->is_immediate   = 0;
++            dr->is_clear       = 0;
++            dr->rt_off         = 0;
++            legacy_record_texture(dr);
+             s_d3d.draw_count++;
+         }
+         return;
+@@ -8138,14 +8310,16 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+     if (actual_count == 0) return;
+ 
+     if (s_d3d.draw_count < MAX_DRAWS) {
+-        s_d3d.draws[s_d3d.draw_count].vb_byte_offset = record_offset;
+-        s_d3d.draws[s_d3d.draw_count].vertex_count   = actual_count;
+-        s_d3d.draws[s_d3d.draw_count].topology       = topo;
+-        s_d3d.draws[s_d3d.draw_count].textured       = 0;
+-        s_d3d.draws[s_d3d.draw_count].is_vp          = 0;
+-        s_d3d.draws[s_d3d.draw_count].is_immediate   = 0;
+-        s_d3d.draws[s_d3d.draw_count].is_clear       = 0;
+-        s_d3d.draws[s_d3d.draw_count].rt_off         = 0;
++        D3D12DrawRecord* dr = &s_d3d.draws[s_d3d.draw_count];
++        dr->vb_byte_offset = record_offset;
++        dr->vertex_count   = actual_count;
++        dr->topology       = topo;
++        dr->textured       = s_d3d.tex_bound;
++        dr->is_vp          = 0;
++        dr->is_immediate   = 0;
++        dr->is_clear       = 0;
++        dr->rt_off         = 0;
++        legacy_record_texture(dr);
+         s_d3d.draw_count++;
+     }
+ }
+@@ -8752,6 +8926,8 @@ void rsx_d3d12_backend_shutdown(void)
+     if (s_d3d.pipeline_state)        s_d3d.pipeline_state->lpVtbl->Release(s_d3d.pipeline_state);
+     if (s_d3d.pipeline_state_immediate)
+         s_d3d.pipeline_state_immediate->lpVtbl->Release(s_d3d.pipeline_state_immediate);
++    if (s_d3d.pipeline_state_tex_generic)
++        s_d3d.pipeline_state_tex_generic->lpVtbl->Release(s_d3d.pipeline_state_tex_generic);
+     if (s_d3d.pipeline_state_lines)  s_d3d.pipeline_state_lines->lpVtbl->Release(s_d3d.pipeline_state_lines);
+     if (s_d3d.pipeline_state_points) s_d3d.pipeline_state_points->lpVtbl->Release(s_d3d.pipeline_state_points);
+     if (s_d3d.depth_buffer) s_d3d.depth_buffer->lpVtbl->Release(s_d3d.depth_buffer);

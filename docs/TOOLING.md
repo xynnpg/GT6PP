@@ -59,6 +59,20 @@ analyzed with `renderdoccmd`/the RenderDoc Python API.
 you supply. It is not used on the v1.00 disc. After extracting
 `Prototypes.adc`, install it with `tools/gt6_install_companion_script.py`.
 
+## Debugging tools (installed locally)
+
+- **ProcMon** (`tools/procmon/Procmon64.exe`) - host file I/O. Confirm the
+  `/font/...` reads and whether the worker's read completes.
+- **x64dbg** (`tools/x64dbg/bin/release/x64dbg.exe`) - user-mode debugger.
+  Attach to `gt6.exe`, break in `sys_lwcond_wait`/`sys_lwcond_signal`, inspect
+  the stuck worker and the guest stacks.
+- **WinDbg** is not installed (no winget on this machine); x64dbg is the
+  installed debugger. ProcMon is portable and needs no install.
+- **DOD3Recomp reference** (`tools/reference/dod3-recomp`, ignored): a
+  playable PS3 recomp using the same ps3recomp toolkit. Its fork
+  `tools/reference/soyjxck-ps3recomp` has a generation-based `sys_lwcond`
+  implementation; see `docs/analysis/dod3-reuse.md`.
+
 ## PFS cache seeding (boot/presents assets)
 
 The native HDD tree originally held only 11 PDIPFS keys, so the guest never

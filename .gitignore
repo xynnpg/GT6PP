@@ -55,6 +55,8 @@ tools/reference/
 tools/dotnet8/
 tools/pamftool/
 tools/ffmpeg/
+tools/procmon/
+tools/x64dbg/
 tools/dotnet-install.ps1
 tools/*.zip
 
