@@ -45,20 +45,20 @@ class Block:
 LEFT = [
     Block(0, 0, 14, 10, "BOOT", 140, 140),
     Block(14, 0, 14, 10, "PPU LIFT", 140, 140),
-    Block(28, 0, 12, 10, "HLE", 84, 120, 12),
-    Block(0, 10, 14, 10, "PFS CACHE", 90, 140, 30),
-    Block(14, 10, 14, 10, "SCRIPT VM", 70, 140, 35),
+    Block(28, 0, 12, 10, "HLE", 87, 120, 14),
+    Block(0, 10, 14, 10, "PFS CACHE", 97, 140, 34),
+    Block(14, 10, 14, 10, "SCRIPT VM", 73, 140, 38),
     Block(28, 10, 12, 10, "SPU / SPURS", 90, 120, 12),
-    Block(0, 20, 20, 8, "THREADS / SYNC", 140, 160, 10),
+    Block(0, 20, 20, 8, "THREADS / SYNC", 144, 160, 14),
     Block(20, 20, 20, 8, "AUDIO / INPUT", 40, 160, 10),
 ]
 RIGHT = [
     Block(0, 0, 12, 10, "GCM INIT", 120, 120),
     Block(12, 0, 10, 10, "CLEARS", 100, 100),
-    Block(22, 0, 10, 10, "D3D12", 92, 100, 6),
+    Block(22, 0, 10, 10, "D3D12", 94, 100, 6),
     Block(32, 0, 8, 10, "DRAW 1", 8, 80, 8),
     Block(0, 10, 14, 10, "DATA2F", 30, 140, 24),
-    Block(14, 10, 14, 10, "TEXTURES", 6, 140, 10),
+    Block(14, 10, 14, 10, "TEXTURES", 10, 140, 17),
     Block(28, 10, 12, 10, "AUDIO OUT", 0, 120),
     Block(0, 20, 14, 8, "INPUT", 0, 112),
     Block(14, 20, 14, 8, "PHYSICS", 0, 112),
@@ -137,7 +137,7 @@ def main() -> None:
     p.append(f'<text x="124" y="{ly}" class="foot">partial / active</text>')
     p.append(f'<rect x="230" y="{ly-7}" width="8" height="8" fill="{DARK}" stroke="{EDGE}" stroke-width="0.5"/>')
     p.append(f'<text x="244" y="{ly}" class="foot">not started</text>')
-    p.append(f'<text x="{W-36}" y="{ly}" text-anchor="end" class="foot">GT6PP · checklist cells, not code coverage · no game data or recompiled code in this repo</text>')
+    p.append(f'<text x="{W-36}" y="{ly}" text-anchor="end" class="foot">GT6PP · checklist cells, not code coverage · diagnostic overlay only; real game draw still black</text>')
     p.append("</svg>")
 
     out = Path("docs/progress.svg")
