@@ -59,6 +59,16 @@ BOOT_WORKER_FUNC = "func_00A122D4"
 BOOT_WORKER_REQUIRED = ("gt6_menu_worker_entry(ctx);",)
 BOOT_PREPARE_FUNC = "func_00A11F20"
 BOOT_PREPARE_REQUIRED = ("gt6_menu_worker_prepare(ctx);",)
+BOOT_LOAD_FUNC = "func_005FA338"
+BOOT_LOAD_REQUIRED = ("gt6_project_load_probe(ctx);",)
+# Current-build MGOM constructor/vector gate probes.
+BOOT_EXTRA = (
+    ("func_006C4EC0", "gt6_mgom_class_probe(ctx);"),
+    ("func_006C5064", "gt6_mgom_class_probe(ctx);"),
+    ("func_006C55DC", "gt6_mgom_factory_probe(ctx);"),
+    ("func_006C4A5C", "gt6_mgom_ctor_probe(ctx);"),
+    ("func_009E2914", "gt6_mgom_vector_clear_probe(ctx);"),
+)
 
 
 def find_function(text: str, name: str) -> str | None:
@@ -133,7 +143,8 @@ def main(argv: list[str]) -> int:
 
     # Boot/presents menu-worker hook (docs/analysis/boot-presents-fix.md).
     for fname, required in ((BOOT_WORKER_FUNC, BOOT_WORKER_REQUIRED),
-                            (BOOT_PREPARE_FUNC, BOOT_PREPARE_REQUIRED)):
+                            (BOOT_PREPARE_FUNC, BOOT_PREPARE_REQUIRED),
+                            (BOOT_LOAD_FUNC, BOOT_LOAD_REQUIRED)):
         n = 0
         for path in sorted(root.glob("ppu_recomp_*.cpp")):
             body = find_function(path.read_text(encoding="latin-1"), fname)
@@ -146,6 +157,22 @@ def main(argv: list[str]) -> int:
                       "run tools/apply_gt6_post_lift.py", file=sys.stderr)
                 return 1
             print(f"{path.name}: {fname} boot/presents hook OK")
+        if n != 1:
+            print(f"expected exactly one {fname}, found {n}", file=sys.stderr)
+            return 1
+
+    for fname, required in BOOT_EXTRA:
+        n = 0
+        for path in sorted(root.glob("ppu_recomp_*.cpp")):
+            body = find_function(path.read_text(encoding="latin-1"), fname)
+            if body is None:
+                continue
+            n += 1
+            if required not in body:
+                print(f"{path.name}: {fname} MGOM probe missing {required}; "
+                      "run tools/apply_gt6_post_lift.py", file=sys.stderr)
+                return 1
+            print(f"{path.name}: {fname} MGOM probe OK")
         if n != 1:
             print(f"expected exactly one {fname}, found {n}", file=sys.stderr)
             return 1

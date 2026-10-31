@@ -1053,6 +1053,108 @@ extern "C" void gt6_mgom_setroot_probe(ppu_context* ctx)
     fprintf(stderr, "[GT6] MGOM.setProjectRoot arg=0x%08X '%s'\n", root, s);
 }
 
+/* Current-build first gate: `main::MGOM = MMenuGameObjectManager()`.
+ * `0x6C4EC0`/`0x6C5064` register the class, `0x6C55DC` is the registered
+ * factory/constructor, and `0x6C4A5C` allocates the 0x108-byte object and
+ * stores it through the caller's output slot.  `0x9E2914` then clears a
+ * pointer vector at `this+0x50..0x54`; the 16 null elements in
+ * `work/bootui3_run.err` are what `0x9E911C` later dispatches.  These probes
+ * are read-only and identify whether the constructor output stays null. */
+extern "C" void gt6_mgom_class_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    fprintf(stderr,
+            "[GT6] MGOM class register r3=0x%08X r4=0x%08X r5=0x%08X "
+            "r6=0x%08X\n",
+            (unsigned)ctx->gpr[3], (unsigned)ctx->gpr[4],
+            (unsigned)ctx->gpr[5], (unsigned)ctx->gpr[6]);
+}
+
+extern "C" void gt6_mgom_factory_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    fprintf(stderr,
+            "[GT6] MGOM factory r3=0x%08X r4=0x%08X r5=0x%08X r6=0x%08X\n",
+            (unsigned)ctx->gpr[3], (unsigned)ctx->gpr[4],
+            (unsigned)ctx->gpr[5], (unsigned)ctx->gpr[6]);
+}
+
+extern "C" void gt6_mgom_ctor_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    const uint32_t out = (uint32_t)ctx->gpr[3];
+    fprintf(stderr,
+            "[GT6] MGOM ctor out=0x%08X [out]=0x%08X r4=0x%08X r5=0x%08X\n",
+            out,
+            gt6_guest_ptr_ok(out) ? vm_read32((uint64_t)out) : 0u,
+            (unsigned)ctx->gpr[4], (unsigned)ctx->gpr[5]);
+}
+
+extern "C" void gt6_mgom_vector_clear_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    const uint32_t self = (uint32_t)ctx->gpr[3];
+    uint32_t begin = 0, end = 0;
+    if (gt6_guest_ptr_ok(self)) {
+        begin = vm_read32((uint64_t)self + 0x50u);
+        end = vm_read32((uint64_t)self + 0x54u);
+    }
+    const unsigned count =
+        (gt6_guest_ptr_ok(begin) && gt6_guest_ptr_ok(end) && end >= begin)
+            ? (unsigned)((end - begin) / 4u) : 0u;
+    fprintf(stderr,
+            "[GT6] MGOM vector clear this=0x%08X begin=0x%08X end=0x%08X "
+            "count=%u first=0x%08X\n",
+            self, begin, end, count,
+            gt6_guest_ptr_ok(begin) ? vm_read32(begin) : 0u);
+}
+
+/* Project loader `0x5FA338` (append ".mproject", call `0x5F0424`).  This is
+ * the decisive probe: if it never runs with "boot", the pending request was
+ * not consumed; if it runs, read the base/name and the following PFS opens. */
+extern "C" void gt6_project_load_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 16) return;
+    }
+    const uint32_t base = (uint32_t)ctx->gpr[4];
+    const uint32_t name = (uint32_t)ctx->gpr[5];
+    char sb[96]; sb[0] = 0;
+    char sn[96]; sn[0] = 0;
+    if (gt6_guest_ptr_ok(base)) {
+        uint32_t d = vm_read32(base);
+        if (!gt6_guest_ptr_ok(d) || !gt6_read_guest_cstr(d, sb, sizeof sb))
+            gt6_read_guest_cstr(base, sb, sizeof sb);
+    }
+    if (gt6_guest_ptr_ok(name)) {
+        uint32_t d = vm_read32(name);
+        if (!gt6_guest_ptr_ok(d) || !gt6_read_guest_cstr(d, sn, sizeof sn))
+            gt6_read_guest_cstr(name, sn, sizeof sn);
+    }
+    fprintf(stderr,
+            "[GT6] project load this=0x%08X base=0x%08X '%s' "
+            "name=0x%08X '%s'\n",
+            (unsigned)ctx->gpr[3], base, sb, name, sn);
+}
+
 /* Pending-project setter `0x568C94`: the context stores the name at +0x50 and
  * raises the pending flag at +0x48.  It does not open any file itself. */
 extern "C" void gt6_menu_project_request(ppu_context* ctx)

@@ -1,4 +1,4 @@
-# Boot/presents gate: the pending `boot` project request is never consumed
+# Boot/presents gate: `MGOM` construction and the pending `boot` request
 
 **Date:** 2026-10-31
 **Target:** GT6 US `BCUS98296` v1.00, `work/bin/EMAIN.elf`, extracted
@@ -31,14 +31,24 @@ or used.
 | Why are no `K/KG`, `K/LH`, `K/IE`, `K/WD` or font keys opened? | **The pending project request is never consumed.** `MGOM.start("boot")` (`0x6C54DC` -> `0x6C5478` -> `0x568C94`) only stores the project name at `manager+0x50` and sets `manager+0x48 = 1`. It does not open a file. The engine update that should observe that pending flag and call the project loader (`0x5FA338` -> `0x5F0424`) is not proven to run before `MainLoop`. |
 | Did the menu worker thread exit prematurely? | **No — hypothesis rejected.** `work/size_run.err:263193-263199` creates thread 35 (`vyENO`, arg `0x7FFECB00`), but the join/exit is at lines `289338-289355`, not immediately after start. The worker is alive for the whole run; its `arg+0x94` keep byte is therefore 1, not 0. Do not add a keep-alive write. |
 | Is a presents/font load behind a missing ADCH builtin/HLE? | **No missing builtin is proven.** `0x5F7D9C` (`loadPackage`), `0x6C54DC`/`0x6C5478` (`MGOM.start`), `0x6C4DC0`/`0x6C4A00` (`setProjectRoot`), and `0x6C5424`/`0x6C5354` (`initialize`) are real, registered guest code. The missing event is the engine-side consumer of `manager+0x48`. |
-| What is the smallest correct step in this pass? | **Read-only probes, not a state write.** The patch logs the worker entry (`arg`, keep byte, queue words), `MGOM.start`, `MGOM.setProjectRoot`, and the pending setter (`0x568C94`) plus the existing `[bootui] project_load` probe. It does not inject an asset, force a project load, or call the presents functions. |
+| What is the smallest correct step in this pass? | **First close the current `MGOM` constructor/vector gate, then probe the pending request.** The latest run (`work/bootui3_run.err`, 18:31) stalls at `0x9E911C` with 16 `NULL value_dispatch` lines on `tid=1` before `MenuClassDefine`; §0.3-0.5 identify the `main::MGOM` object/vector as the likely first gate (add the `class_registrar` / `mgom_ctor` / `vector_clear` probes there). The probes in section 3 are read-only and cover the **next** gate: worker entry, `MGOM.start`, `setProjectRoot`, the pending setter, and the project loader. No asset is injected and no presents function is called. |
 | Secondary bug | `loadPackage` (`0x14C43D8` -> `0x5F7D9C`) dereferences a null package object after `0x9F79A8` fails (`work/size_run.err:289169-289243`). It is a separate null-object bug on the `MainLoop` -> `LoadMenuResource` path. |
+
+> **Current-build note (concurrent check):** `work/bootui3_run.err` (18:31)
+> contains 16 `[bootui] NULL value_dispatch r3=0 b=0 p=0 lr=0x009E2944 tid=1`
+> lines before `MenuClassDefine`, then `HOTREAD8 ... 0x9E911C`. Sections 0.3-0.5
+> (added by that check) identify the `main::MGOM` constructor/vector at
+> `0x006C55DC` -> `0x006C4A5C` and the vector clear at `0x009E2914` as the
+> current first gate. The worker/pending-request probes in section 3 are for the
+> **next** gate, after `MGOM` is non-null. Do not merge the two gates into one.
 
 ### 0.1 Current probe-build prerequisite: `0x9E911C` with `r11=0`
 
-The latest probe run, `work/bootui2_run.err` (18:24), does **not** reach the
-menu boundary. After the `[bootui] value_dispatch` stream it logs a series of
-wild guest-page commits and then:
+The latest probe runs, `work/bootui2_run.err` (18:24) and
+`work/bootui3_run.err` (18:31), do **not** reach the menu boundary. After the
+`[bootui] value_dispatch` stream, `bootui3` logs 16
+`[bootui] NULL value_dispatch r3=0 b=0 p=0 lr=0x009E2944 tid=1` lines, then
+the wild guest-page commits and:
 
 ```text
 [GT6] faulted in guest page 0x65760000 (write) -- committed
@@ -154,6 +164,9 @@ measured. The new probes log:
 [bootui] vector_clear this=... begin=... end=... count=...
 ```
 
+The §3 patch implements the same read-only points with the `[GT6] MGOM class
+register` / `MGOM factory` / `MGOM ctor` / `MGOM vector clear` prefixes.
+
 Interpretation:
 
 - `class_registrar`/`class_register_impl` absent before line 250 -> the
@@ -195,6 +208,8 @@ Consequence of a null guard: the VM stops faulting, but `MGOM` remains null and
 bring-up fallback only, not a fix.
 
 
+
+## 1. Script-side trace
 
 ### 1.1 `main.adc`
 
@@ -401,13 +416,20 @@ extern "C" void gt6_menu_worker_prepare(ppu_context* ctx)
     /* logs holder=0x159B990, *holder, and the keep byte before create */
 }
 
+extern "C" void gt6_mgom_class_probe(ppu_context* ctx);   /* class register */
+extern "C" void gt6_mgom_factory_probe(ppu_context* ctx); /* 0x6C55DC factory */
+extern "C" void gt6_mgom_ctor_probe(ppu_context* ctx);    /* 0x6C4A5C ctor */
+extern "C" void gt6_mgom_vector_clear_probe(ppu_context* ctx); /* 0x9E2914 */
 extern "C" void gt6_mgom_start_probe(ppu_context* ctx);   /* MGOM.start name */
 extern "C" void gt6_mgom_setroot_probe(ppu_context* ctx); /* MGOM.setProjectRoot */
 extern "C" void gt6_menu_project_request(ppu_context* ctx);/* 0x568C94 pending */
+extern "C" void gt6_project_load_probe(ppu_context* ctx); /* 0x5FA338 loader */
 ```
 
 None of these writes guest memory or calls guest code. The probes are gated by
-`GT6_BOOT_TRACE=1`.
+`GT6_BOOT_TRACE=1`. The `class registrar` / `MGOM factory` / `MGOM ctor` /
+`MGOM vector clear` probes are the current-build gate from §0.4; the
+`MGOM.start` / pending / project-load probes are the next gate.
 
 ### 3.2 `tools/apply_gt6_post_lift.py`
 
@@ -415,13 +437,18 @@ None of these writes guest memory or calls guest code. The probes are gated by
 
 | File | Guest function | Hook |
 |---|---|---|
+| `ppu_recomp_015.cpp` | `func_006C4EC0` / `func_006C5064` (class register) | `gt6_mgom_class_probe(ctx)` |
+| `ppu_recomp_015.cpp` | `func_006C55DC` (class factory) | `gt6_mgom_factory_probe(ctx)` |
+| `ppu_recomp_015.cpp` | `func_006C4A5C` (0x108-byte ctor) | `gt6_mgom_ctor_probe(ctx)` |
+| `ppu_recomp_022.cpp` | `func_009E2914` (vector clear) | `gt6_mgom_vector_clear_probe(ctx)` |
 | `ppu_recomp_023.cpp` | `func_00A11F20` (thread create helper) | `gt6_menu_worker_prepare(ctx)` |
 | `ppu_recomp_023.cpp` | `func_00A122D4` (worker entry thunk) | `gt6_menu_worker_entry(ctx)` |
 | `ppu_recomp_015.cpp` | `func_006C54DC` (`MGOM.start` wrapper) | `gt6_mgom_start_probe(ctx)` |
 | `ppu_recomp_015.cpp` | `func_006C4DC0` (`MGOM.setProjectRoot` wrapper) | `gt6_mgom_setroot_probe(ctx)` |
 | `ppu_recomp_012.cpp` | `func_00568C94` (pending-project setter) | `gt6_menu_project_request(ctx)` |
+| `ppu_recomp_013.cpp` | `func_005FA338` (project loader) | `gt6_project_load_probe(ctx)` |
 
-The function is idempotent (verified on a scratch copy: first pass 3 files,
+The function is idempotent (verified on a scratch copy: first pass 5 files,
 second pass 0 changes) and is called from `main()` before the FileDevice
 patch. It is a tool-side post-lift hook, so no generated file is committed.
 `tools/post_lift_fixes.py` now fails the relift if either
@@ -451,11 +478,16 @@ with both `GT6_BOOT_TRACE=1` and `GT6_BOOTUI_TRACE=1`.
 With the probes built:
 
 ```text
+[GT6] MGOM class register r3=0x........ r4=0x........ r5=0x........ r6=0x........
+[GT6] MGOM factory r3=0x........ r4=0x........ r5=0x........ r6=0x........
+[GT6] MGOM ctor out=0x........ [out]=0x........ r4=0x........ r5=0x........
+[GT6] MGOM vector clear this=0x........ begin=0x........ end=0x........ count=... first=0x........
 [GT6] menu worker prepare holder=0x........ obj=0x7FFECB00 flag=0
 [GT6] menu worker entry arg=0x7FFECB00 keep=1 q0=0x........ q1=0x........ q2=0x........
 [GT6] MGOM.setProjectRoot arg=0x........ '/projects/gt6'
 [GT6] MGOM.start name=0x........ 'boot'
 [GT6] menu project request obj=0x........ name=0x........ word0=0x........ word1=0x........ pending_before=0 (0x568C94 sets +0x48=1 next)
+[GT6] project load this=0x........ base=0x........ '.../boot' name=0x........ 'boot'
 ```
 
 The `keep=1` is the corrected expectation; if it is `0` on a future run, the
@@ -519,6 +551,13 @@ sizes. Do not accept a 0-byte or synthesized file as evidence.
 
 ## 5. Verification plan
 
+0. Current first gate (`work/bootui3_run.err`): the `MGOM class register` /
+   `MGOM factory` / `MGOM ctor` / `MGOM vector clear` probes in section 3 are
+   included. Require class registration before the factory, and require
+   `MGOM ctor [out]` to become nonzero before `main.adc` line 250 (the entry
+   probe logs the pre-call slot; add a post-call wrapper if the value is still
+   ambiguous). If `MGOM` is null, stop: the worker/pending-request probes below
+   are not reachable. Do not add a null guard at `0x9E911C`.
 1. Apply the post-lift probes and rebuild through the normal
    `scripts/relift-gt6.ps1` / `scripts/build-gt6.ps1` path.
 2. Run headless for 240-300 s with `GT6_BOOT_TRACE=1`,
@@ -530,8 +569,9 @@ sizes. Do not accept a 0-byte or synthesized file as evidence.
    '/projects/gt6'`, and `menu project request ... 'boot'` must appear
    **before** the `K/KG` open. The `pending_before` value is the state before
    `0x568C94` sets `+0x48=1`.
-5. Third gate: `[bootui] project_load ...` from `0x5FA338` must appear, with
-   `sname`/`sbase` containing `boot` (the loader appends `.mproject`). If it
+5. Third gate: `[GT6] project load ...` (or the equivalent
+   `[bootui] project_load ...`) from `0x5FA338` must appear, with
+   `base`/`name` containing `boot` (the loader appends `.mproject`). If it
    never appears, the project consumer is missing; the next owner is the
    native engine update/frame loop, not the presents functions.
 6. Fourth gate: the four boot assets above must be served by the PFS override,
@@ -578,6 +618,10 @@ bytes), so an absent disc asset is not the explanation.
 | `0x1CA61` | `main.adc` `MGOM.initialize()` |
 | `0x1CCA2` | `main.adc` `MGOM.start("boot")` |
 | `0xD0C3E` / `0xD066C` | `MainLoop` -> `LoadMenuResource` / `LoadMenuResource` |
+| `0x6C4EC0` / `0x6C5064` | `MMenuGameObjectManager` class registration |
+| `0x6C55DC` | registered factory/constructor entry |
+| `0x6C4A5C` | 0x108-byte `MMenuGameObjectManager` allocation/initializer |
+| `0x9E2914` / `0x9E911C` | vector clear / typed-value dispatch (null-vector site) |
 | `0x6C5424` | `MGOM.initialize` script wrapper (`0x14CD328`) |
 | `0x6C5354` | `MGOM.initialize` implementation |
 | `0x5F093C` | menu context start / worker setup |
@@ -626,3 +670,69 @@ code, and it runs at relift time.
   missing native frame-loop call.
 - The `loadPackage` null object remains a separate bug. Do not use its
   null-page writes as evidence that the boot path ran.
+
+## Opus handoff (2026-10-31, branch `opus/boot-frame`)
+
+**Answer: MGOM is not the null object.** The 16 `NULL value_dispatch` lines
+are teardown. They come after the script has already given up.
+
+Evidence (`work/opus_run.err`, 4 runs, `GT6_BOOTUI_TRACE=1 GT6_BOOT_TRACE=1`):
+- `[GT6] MGOM class register r3=0x4001CC90 r4=0x4009F080` fires at startup
+  (line ~600). Hypothesis A (registration missing) is false.
+- The boot result is **nondeterministic between runs**:
+  - Runs 1-3: `initApp` (`bootstrap.ad` lines 142-148, 39 instructions) is
+    entered (`step_ret st=4 pc=0x40110010`). Its frame never reaches
+    `SET_STATE 1`. TOP resumes at the `try { execBoot() }` exit (`JUMP 5490`),
+    so `success` is false, `MainLoop` is skipped and `execShutdown` runs. Then
+    `0x9E2968` destroys every code object (`vector_clear lr=0x009E297C`), and
+    the first one is the 5,564-instruction TOP. Code object `0x401EAE70`
+    (10 slots) holds null instruction pointers, which gives the 16 null
+    dispatches. Guest pages `0xF8210000`/`0x38210000` are paged in during that
+    teardown, and those look like PPC opcodes read as pointers. **Do not guard
+    `0x9E911C`**: the run is already dead by then.
+  - Run 4: `initApp` finishes. `MenuClassDefine` and `Prototypes.mwidget` are
+    served, then `MGOM factory/ctor` fire (hypothesis B: `[out]` is read at
+    entry, so 0 is expected there; the object is valid because
+    `setProjectRoot` and `start` run on it). `cursor.mproject`/`cursor.adc`
+    load. `MGOM.start` (execBoot) -> `menu project request obj=0x7FEFE000`
+    sets `+0x48=1`. **No `project load` for boot follows.** `MainLoop` ->
+    `LoadMenuResource` -> `loadPackage("/projects/gt6/arcade/arcade.mpackage")`
+    opens `PDIPFS_bdmark/K/L4` and `K/L4.fdupm`, but nothing reads the data.
+    The package object stays null, and `0x6CC5D0` writes to NULL+4/8/C
+    (dropped). The `MainLoop` frame then ends without `SET_STATE`, and `step_ret`
+    is never logged for it. TOP falls through to shutdown.
+- Common pattern: in both failures a script frame is dropped in the middle of a
+  step and no Adhoc exception is raised. That looks like a native fault
+  being recovered (null-call "returning with r3 untouched", setjmp guard)
+  that unwinds the whole `0x9EEA88` step. The cause is not a script `throw`.
+
+Changes: `tools/gt6_boot_ui_probe.py` adds a per-instruction trace of the frame
+loop (`[bootui] ins frame= op= line= st=`; opcode byte = `word0>>24`, line =
+`word0&0xFFFFFF`; status 5 run / 4 call / 1 return). `vector_clear` now logs
+`lr` and skips empty vectors. Deleted the rejected
+`patches/gt6-pfs-source-bind.patch`. `patches/gt6-boot-ui-probe.patch` is
+**not** regenerated: regenerate it from a clean relift.
+
+Still broken (first failing addresses):
+1. Intermittent: the native call inside `initApp` that drops the frame.
+   Candidates are `pdistd::MRandom`, `pdiext::getBetterTime().getBySecond`,
+   `getMTInt().toULong`, `GetSystemTimeMicroSecond`, and the `pdiapp::play_id`
+   setter. The time-dependent ones are the likely suspects. Next: in a failing
+   run, read the last `[bootui] ins ... line=14x` before the TOP `JUMP`.
+2. The boot pending flag (`ctx 0x7FEFE000 +0x48`) is never consumed. The menu
+   worker (tid 35, arg `0x7FFECB00`, `q0==q1` = empty queue) never wakes. The
+   signal in `0x568C94` goes to `ctx+0x18` via `0xA21D50`. Check whether that
+   object is the one the worker waits on. Cursor reference loader: `0x56B948`
+   (called from `0x5E7DF0`).
+3. `loadPackage` (`0x5F7D9C`): `K/L4` (arcade), `K/KZ` (option) and `K/WY`
+   (gtmode) are not seeded. Try `python tools\gt6_seed_pfs_cache.py --keys
+   K/L4,K/KZ,K/WY,K/7P,K/J4` before the next run.
+
+No frame was produced. Success criterion 1 (boot assets) was **not** reached.
+
+Next command:
+    python tools\apply_gt6_post_lift.py gt6\generated
+    python tools\gt6_boot_ui_probe.py; git apply patches\gt6-boot-ui-probe.patch
+    powershell -ExecutionPolicy Bypass -File scripts\build-gt6.ps1
+    $env:GT6_BOOTUI_TRACE="1"; $env:GT6_BOOT_TRACE="1"; .\gt6\build\gt6.exe work\bin\EMAIN.elf 2> work\opus_run.err
+    Select-String work\opus_run.err -Pattern "\] ins .*line=14[2-8]|step_ret|MGOM|project load|package_load"

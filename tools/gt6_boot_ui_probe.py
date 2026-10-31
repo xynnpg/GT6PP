@@ -135,8 +135,28 @@ def main(argv: list[str]) -> int:
             '        { uint32_t _t = (uint32_t)ctx->gpr[3];\n'
             '          uint32_t _b = (_t >= 0x10000u) ? vm_read32((uint64_t)_t + 0x50u) : 0u;\n'
             '          uint32_t _e = (_t >= 0x10000u) ? vm_read32((uint64_t)_t + 0x54u) : 0u;\n'
-            '          fprintf(stderr, "[bootui] vector_clear this=0x%08X begin=0x%08X end=0x%08X count=%u\\n",\n'
-            '                  _t, _b, _e, (_e >= _b) ? (_e - _b) / 4u : 0u); }\n',
+            '          if (_b) fprintf(stderr, "[bootui] vector_clear this=0x%08X begin=0x%08X end=0x%08X count=%u lr=0x%08X tid=%llu\\n",\n'
+            '                  _t, _b, _e, (_e >= _b) ? (_e - _b) / 4u : 0u, (unsigned)ctx->lr, (unsigned long long)ctx->thread_id); }\n',
+        ),
+        # Per-instruction trace of the script frame loop (0x9EEA88): opcode
+        # byte, source line and VM status after each instruction.  Status 5 =
+        # keep running, 4 = call pushed, 1 = frame returned.  Printed for tid 1
+        # when the status changes or the line is in initApp (142..148).
+        (
+            "loc_009EEC10:\n        vm_write32(ctx->gpr[31] + 0x1C, ctx->gpr[7]);\n",
+            '        gt6_bootui_ins = (uint32_t)ctx->gpr[10]; gt6_bootui_fr = (uint32_t)ctx->gpr[31];\n',
+        ),
+        (
+            "        ctx->lr = 0x009EEC40; ps3_indirect_call(ctx); DRAIN_TRAMPOLINE(ctx);\n",
+            '        { static int _n; uint32_t _w = vm_read32(gt6_bootui_ins); uint32_t _ln = _w & 0xFFFFFFu;\n'
+            '          uint32_t _st = vm_read32(vm_read32(gt6_bootui_fr + 0x4) + 0x24);\n'
+            '          if (getenv("GT6_BOOTUI_TRACE") && ctx->thread_id == 1 && ((_ln >= 0x8E && _ln <= 0x94) || _st != 5) && _n++ < 3000)\n'
+            '            fprintf(stderr, "[bootui] ins frame=0x%08X ins=0x%08X op=0x%02X line=%u st=%u\\n",\n'
+            '                    gt6_bootui_fr, gt6_bootui_ins, _w >> 24, _ln, _st); }\n',
+        ),
+        (
+            '#include "ppu_recomp.h"\n',
+            "static thread_local uint32_t gt6_bootui_ins, gt6_bootui_fr;\n",
         ),
         (
             "void func_009EEA88(ppu_context* ctx) {\n    PPU_MM_SNAP\n",
