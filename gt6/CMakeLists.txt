@@ -53,17 +53,24 @@ set(PS3RECOMP_PPU_SOURCES
     "${PS3RECOMP_DIR}/runtime/ppu/ppu_fs.cpp"       # cellFs VFS
 )
 
-# Lifted SPU images. All four of this title's SPURS workloads carry the same
-# policy module (the WWS job manager), embedded in EMAIN.ELF rather than loaded
-# from a data file -- see src/gen/spu_workloads.c.
+# Lifted SPU images. The four embedded SPU ELFs are ancillary cores; the WWS
+# workloads themselves all pass one raw 0x2F80-byte job-manager policy module
+# at guest EA 0x013FFE00 (`spu_workloads_pm.c`, image id 5). See
+# docs/analysis/spu-spurs.md.
 option(GT6_ENABLE_SPU "Compile and register the lifted SPU images" OFF)
-set(GT6_SPU_SOURCES "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads.c")
+set(GT6_SPU_SOURCES
+    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads.c"
+    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_pm.c"
+    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_jobs.c")
 if(GT6_ENABLE_SPU)
     file(GLOB GT6_SPU_LIFTED CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/generated/spu_lifted/*/spu_recomp.c")
+    file(GLOB GT6_SPU_JOB_LIFTED CONFIGURE_DEPENDS
+        "${CMAKE_SOURCE_DIR}/generated/spu_lifted/jobs/*/spu_recomp.c")
     list(LENGTH GT6_SPU_LIFTED N_SPU)
-    message(STATUS "lifted SPU images: ${N_SPU}")
-    list(APPEND GT6_SPU_SOURCES ${GT6_SPU_LIFTED})
+    list(LENGTH GT6_SPU_JOB_LIFTED N_SPU_JOBS)
+    message(STATUS "lifted SPU images: ${N_SPU} + ${N_SPU_JOBS} runtime jobs")
+    list(APPEND GT6_SPU_SOURCES ${GT6_SPU_LIFTED} ${GT6_SPU_JOB_LIFTED})
     # The lifted sources include "spu_context.h" relative to the runtime; scope
     # the include to these TUs so the huge PPU chunks keep their cached command.
     set_source_files_properties(${GT6_SPU_SOURCES} PROPERTIES
@@ -94,6 +101,14 @@ target_include_directories(gt6 PRIVATE
 )
 
 target_link_libraries(gt6 PRIVATE ps3recomp_runtime)
+
+# LLVM-MinGW defaults to dynamic libc++/libunwind. A double-clicked gt6.exe
+# then fails before main with "libc++.dll was not found" unless the toolchain
+# bin directory is on PATH. Link the C++ runtime statically so the executable
+# is self-contained; Windows system DLLs (D3D12, kernel32, ...) stay dynamic.
+if(MINGW)
+    target_link_options(gt6 PRIVATE -static)
+endif()
 
 if(WIN32)
     target_link_libraries(gt6 PRIVATE

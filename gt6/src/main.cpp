@@ -34,6 +34,7 @@
 #include "ppu_context.h"
 #include "vm.h"
 #include "lv2_syscall_table.h"
+#include "sys_ppu_thread.h"
 
 #include "elf_loader.h"
 
@@ -69,6 +70,7 @@ void ps3_install_guest_ptr_trap(void);
 unsigned int ps3_hle_count(void);
 void cellfs_set_root_path(const char* root);
 void cellfs_add_path_mapping(const char* ps3_prefix, const char* host_path);
+extern const char* ppu_vfs_root;          /* runtime/ppu/ppu_fs.cpp */
 void cellGame_init_from_paramsfo(const char* sfo_path);
 /* sys_fs.cpp's path-translation root: /dev_bdvd/... is stripped and appended
  * to this. It must be the directory containing PS3_GAME. */
@@ -88,6 +90,8 @@ void vm_write16(uint64_t a, uint16_t v);
 uint64_t vm_read64(uint64_t a);
 extern const char* g_hle_inflight[64];    /* per-thread: HLE currently executing */
 void gt6_spu_register_all(void);         /* generated: src/gen/spu_workloads.c */
+void gt6_spu_register_pm_clean(void);    /* WWS job-manager PM, image id 5 */
+void gt6_spu_register_jobs(void);        /* 15 runtime SPURS job images, ids 6..20 */
 void gt6_start_present_thread(void);     /* src/gt6_present.cpp */
 }
 
@@ -107,6 +111,38 @@ void gt6_start_present_thread(void);     /* src/gt6_present.cpp */
 
 /* argv/envp block handed to the guest _start. */
 #define GT6_ARGV_BASE      0x00F00000u
+
+/* cellFs prepends its VFS root to a *relative* mapping host path. The mapping
+ * table below is written relative to the project root, so passing it through
+ * unchanged turned
+ *     /dev_bdvd/PS3_GAME/USRDIR/GT.VOL
+ * into
+ *     <USRDIR>/PS3-Version/.../PS3_GAME/PS3_GAME/USRDIR/GT.VOL
+ * -- which is why the absolute GT.VOL open never landed. Resolve every mapping
+ * to an absolute host path first; cellFs then uses it verbatim. */
+static void gt6_abs_path(char* out, size_t cap, const char* in)
+{
+#ifdef _WIN32
+    char tmp[MAX_PATH];
+    DWORD n = GetFullPathNameA(in, MAX_PATH, tmp, nullptr);
+    if (n == 0 || n >= MAX_PATH) { snprintf(out, cap, "%s", in); return; }
+    snprintf(out, cap, "%s", tmp);
+    for (char* p = out; *p; ++p) if (*p == '\\') *p = '/';
+#else
+    snprintf(out, cap, "%s", in);
+#endif
+}
+
+static void gt6_add_mapping(const char* ps3_prefix, const char* host)
+{
+    char abs[512], with_slash[520];
+    gt6_abs_path(abs, sizeof abs, host);
+    size_t n = strlen(abs);
+    snprintf(with_slash, sizeof with_slash, "%s%s", abs,
+             (n && abs[n - 1] == '/') ? "" : "/");
+    cellfs_add_path_mapping(ps3_prefix, with_slash);
+    printf("[GT6] map %-28s -> %s\n", ps3_prefix, with_slash);
+}
 
 /* Main thread stack. The runtime hands ppu_thread stacks out of its own
  * region at 0xD0000000; main is created by us, so it needs one too. 1 MB
@@ -359,12 +395,77 @@ static LONG CALLBACK report_crash(EXCEPTION_POINTERS* ep)
             fprintf(stderr, " = GUEST 0x%08X", (uint32_t)(at - (uintptr_t)vm_base));
         fprintf(stderr, " (thread %lu)\n", GetCurrentThreadId());
     }
+    {
+        const DWORD host_tid = GetCurrentThreadId();
+        uint32_t guest_fn = ppu_prof_resolve_host(er->ExceptionAddress);
+        char* image_base = (char*)GetModuleHandleA(nullptr);
+        fprintf(stderr, "[GT6] thread=%lu rip=%p rva=0x%llX guest_fn=0x%08X\n",
+                (unsigned long)host_tid, er->ExceptionAddress,
+                (unsigned long long)((char*)er->ExceptionAddress - image_base),
+                guest_fn);
+        int found = 0;
+        for (int i = 0; i < PPU_THREAD_MAX; i++) {
+            const ppu_thread_info* t = &g_ppu_threads[i];
+            if (t->state == PPU_THREAD_STATE_FREE || t->host_tid != host_tid)
+                continue;
+            found = 1;
+            fprintf(stderr,
+                    "[GT6] crash is PPU tid=%d name=\"%s\" entry=0x%08llX "
+                    "prof_pc=0x%08X hle=%s\n",
+                    i, t->name, (unsigned long long)t->entry_addr, t->prof_pc,
+                    (i < 64 && g_hle_inflight[i]) ? g_hle_inflight[i] : "-");
+        }
+        {
+            void* frames[24];
+            USHORT nf = RtlCaptureStackBackTrace(0, 24, frames, nullptr);
+            fprintf(stderr, "[GT6] host stack:");
+            for (USHORT f = 0; f < nf; f++)
+                fprintf(stderr, " %llX",
+                        (unsigned long long)((char*)frames[f] - image_base));
+            fputc('\n', stderr);
+            if (ep->ContextRecord) {
+                uint64_t* sp = (uint64_t*)ep->ContextRecord->Rsp;
+                fprintf(stderr, "[GT6] rsp=%p scan:",
+                        (void*)ep->ContextRecord->Rsp);
+                for (int i = 0; i < 64 && sp; i++) {
+                    uint64_t w = sp[i];
+                    if (w >= (uint64_t)image_base &&
+                        w < (uint64_t)image_base + 0x10000000ull)
+                        fprintf(stderr, " %llX",
+                                (unsigned long long)(w - (uint64_t)image_base));
+                }
+                fputc('\n', stderr);
+            }
+        }
+        if (!found) {
+            fprintf(stderr, "[GT6] crash is NOT a PPU thread (present/SPU/host)\n");
+            for (int i = 0; i < PPU_THREAD_MAX; i++) {
+                const ppu_thread_info* t = &g_ppu_threads[i];
+                if (t->state == PPU_THREAD_STATE_FREE) continue;
+                fprintf(stderr, "[GT6]   ppu tid=%d %-9s entry=0x%08llX "
+                        "prof_pc=0x%08X hle=%s\n", i,
+                        t->state == PPU_THREAD_STATE_RUNNING ? "RUNNING" : "OTHER",
+                        (unsigned long long)t->entry_addr, t->prof_pc,
+                        (i < 64 && g_hle_inflight[i]) ? g_hle_inflight[i] : "-");
+            }
+        }
+    }
     fprintf(stderr, "[GT6]   r1(SP)=0x%08X r2(TOC)=0x%08X r3=0x%08X LR=0x%08X CTR=0x%08X\n",
             (uint32_t)g_main_ctx.gpr[1], (uint32_t)g_main_ctx.gpr[2],
             (uint32_t)g_main_ctx.gpr[3], (uint32_t)g_main_ctx.lr,
             (uint32_t)g_main_ctx.ctr);
     fflush(stderr);
     fflush(stdout);
+    /* Diagnostic containment: a fault in one guest worker (GT6's SPU event
+     * handler) currently takes the whole process down. Keep the window and the
+     * remaining PPU threads alive so the next stage is observable. Off by
+     * default; the real fix must remove the fault. */
+    if (getenv("GT6_CRASH_THREAD_EXIT")) {
+        fprintf(stderr, "[GT6] GT6_CRASH_THREAD_EXIT: ending only this host thread\n");
+        fflush(stderr);
+        fflush(stdout);
+        ExitThread(0xDEADBEEFu);
+    }
     return EXCEPTION_EXECUTE_HANDLER;
 }
 #endif
@@ -448,8 +549,56 @@ static void setup_argv(const char* argv0)
     printf(")\n");
 }
 
+#ifdef _WIN32
+/* Double-clicking gt6\build\gt6.exe leaves the process CWD at gt6\build, so
+ * every relative game path (work/bin/EMAIN.elf, the VFS root, work/gt6_hdd0)
+ * misses. Walk up from the executable until a directory contains
+ * work/bin/EMAIN.elf, and use that as the project root. */
+static void gt6_set_project_cwd(void)
+{
+    char path[MAX_PATH];
+    DWORD n = GetModuleFileNameA(nullptr, path, MAX_PATH);
+    if (!n || n >= MAX_PATH) return;
+    for (char* p = path + n; p > path; --p)
+        if (*p == '\\' || *p == '/') { *p = 0; break; }
+    for (int up = 0; up < 5; ++up) {
+        char probe[MAX_PATH], cwd[MAX_PATH];
+        snprintf(probe, sizeof probe, "%s\\work\\bin\\EMAIN.elf", path);
+        if (GetFileAttributesA(probe) != INVALID_FILE_ATTRIBUTES &&
+            GetCurrentDirectoryA(MAX_PATH, cwd)) {
+            SetCurrentDirectoryA(path);
+            printf("[GT6] project root: %s\n", path);
+            return;
+        }
+        char* slash = strrchr(path, '\\');
+        if (!slash) slash = strrchr(path, '/');
+        if (!slash) return;
+        *slash = 0;
+    }
+}
+#endif
+
 int main(int argc, char* argv[])
 {
+#ifdef _WIN32
+    gt6_set_project_cwd();
+    /* GT6's audio/event pump legitimately calls the same handler thousands of
+     * times while it waits for SPU work. The runtime's default 2000-call
+     * stuck guard aborts the process before the first flips; raise it for this
+     * title unless the caller chose a stricter value. */
+    if (!getenv("PPU_STUCKMAX")) _putenv_s("PPU_STUCKMAX", "1000000");
+    /* GT6's guest display buffers are 1280x720 pitch 6144. Until the guest
+     * context's FIFO flip is wired through, presenting the guest buffer keeps
+     * the window stable instead of exiting on the empty-swapchain path. */
+    if (!getenv("GCM_GUEST_FB")) _putenv_s("GCM_GUEST_FB", "0,1280,720,6144");
+    /* Double-click runs are quiet: the runtime logs thousands of lines on the
+     * console once the SPU job chains start. Keep them in work/gt6.log unless
+     * the caller asked for verbose output or an explicit console. */
+    if (!getenv("PS3_VERBOSE") && !getenv("GT6_CONSOLE")) {
+        if (freopen("work/gt6.log", "w", stdout))
+            freopen("work/gt6.log", "a", stderr);
+    }
+#endif
     /* Buffer both streams. Unbuffered stdio issues a write per conversion, so
      * with several guest threads logging at once lines interleave mid-token and
      * a message that IS in the log reads as absent to grep. The crash filter
@@ -497,20 +646,40 @@ int main(int argc, char* argv[])
     {
         const char* vfs = getenv("PS3_VFS_ROOT");
         if (!vfs || !*vfs) vfs = GT6_USRDIR;
-        cellfs_set_root_path(vfs);
+        char vfs_abs[512];
+        gt6_abs_path(vfs_abs, sizeof vfs_abs, vfs);
+        cellfs_set_root_path(vfs_abs);
         /* sys_fs strips /dev_bdvd/ and appends to its own root. Point it at
          * the directory containing PS3_GAME, not at USRDIR. */
-        snprintf(g_sys_fs_root, sizeof g_sys_fs_root, "%s", GT6_GAME_ROOT);
-        cellfs_add_path_mapping("/dev_bdvd/PS3_GAME/",          GT6_GAME_DIR "/");
-        cellfs_add_path_mapping("/dev_bdvd/",                   GT6_GAME_DIR "/");
-        cellfs_add_path_mapping("/dev_hdd0/game/BCUS98296/",    "work/gt6_hdd0/game/BCUS98296/");
-        cellfs_add_path_mapping("/app_home/",                   "work/gt6_app_home/");
-        cellfs_add_path_mapping("/dev_hdd0/",                   "work/gt6_hdd0/");
-        cellfs_add_path_mapping("/dev_hdd1/",                   "work/gt6_hdd1/");
-        cellfs_add_path_mapping("/dev_usb000/",                 "work/gt6_usb/");
+        {
+            static char root_for_runtime[512];
+            gt6_abs_path(root_for_runtime, sizeof root_for_runtime, GT6_GAME_ROOT);
+            snprintf(g_sys_fs_root, sizeof g_sys_fs_root, "%s", root_for_runtime);
+            ppu_vfs_root = root_for_runtime;   /* ppu_fs/cellGame mount root */
+        }
+        gt6_add_mapping("/dev_bdvd/PS3_GAME/",       GT6_GAME_DIR);
+        gt6_add_mapping("/dev_bdvd/",                GT6_GAME_ROOT);
+        gt6_add_mapping("/dev_hdd0/game/BCUS98296/", "work/gt6_hdd0/game/BCUS98296");
+        gt6_add_mapping("/app_home/",                "work/gt6_app_home");
+        gt6_add_mapping("/dev_hdd0/",                "work/gt6_hdd0");
+        gt6_add_mapping("/dev_hdd1/",                "work/gt6_hdd1");
+        gt6_add_mapping("/dev_usb000/",              "work/gt6_usb");
         /* Update overlays, once a PDIPFS dump is present. */
-        cellfs_add_path_mapping("PDIPFS/",                      "work/gt6_pdipfs/");
-        printf("[GT6] cellFs root=\"%s\" (disc -> %s/)\n", vfs, GT6_GAME_DIR);
+        gt6_add_mapping("PDIPFS/",                   "work/gt6_pdipfs");
+
+        /* ppu_fs.cpp and cellFs.c both implement /dev_hdd0, but ppu_fs strips
+         * the mount and appends to ppu_vfs_root while cellFs uses its mapping
+         * table. Point both at work/gt6_hdd0 so a temp file created through one
+         * is visible to rename/stat through the other. */
+        {
+            static char hdd0_abs[512], hdd1_abs[512];
+            gt6_abs_path(hdd0_abs, sizeof hdd0_abs, "work/gt6_hdd0");
+            gt6_abs_path(hdd1_abs, sizeof hdd1_abs, "work/gt6_hdd1");
+            _putenv_s("PS3_HDD0_ROOT", hdd0_abs);
+            _putenv_s("PS3_HDD1_ROOT", hdd1_abs);
+        }
+        printf("[GT6] cellFs root=\"%s\" (disc -> %s/)\n", vfs_abs,
+               GT6_GAME_DIR);
 
         /* Give cellGame the real ids. Without this the HLE answers every
          * cellGame/cellDiscGame query with its built-in fallback, and this
@@ -542,6 +711,8 @@ int main(int argc, char* argv[])
     ppu_recomp_register();
     ppu_install_thread_trampoline();
     gt6_spu_register_all();   /* after the ELF load: fingerprints the loaded image */
+    gt6_spu_register_pm_clean();  /* raw WWS PM at 0x013FFE00 (image id 5) */
+    gt6_spu_register_jobs();      /* SPURS job binaries captured from the running title */
 
     /* Give the main thread an actual stack. ppu_run reserves the entry ABI
      * frame and argv strings below this top. */

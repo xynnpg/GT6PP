@@ -1,7 +1,10 @@
 # Status — 2026-10-31
 
-This is a measured snapshot, not a plan. Re-run the commands before trusting a
-number after a new lift.
+> **Current state:** boot script parses fully; UI scripts load; black 1280×720
+> window presents with `draws: 0`. See
+> [analysis/CONTINUE-HERE.md](analysis/CONTINUE-HERE.md) for the live handoff.
+> The tables below are the earlier measured snapshot; re-run the commands
+> before trusting a number after a new lift.
 
 ## Media
 
@@ -87,21 +90,26 @@ Command used:
 
 ```powershell
 python third_party/ps3recomp/tools/ppu_lifter.py work/bin/EMAIN.elf `
-  --functions work/analysis/emain/functions_final3.json `
+  --functions work/analysis/emain/functions_corrected.json `
   --hle-stubs work/analysis/emain/hle_stubs.json `
   --output gt6/generated --code-end 0xF908C4 --chunks 40 --jobs 8
+python tools/setjmp_patch_gt6.py gt6/generated
+powershell -File scripts/lift-spu-gt6.ps1 -Force
 ```
 
-Result: **78,770 functions** lifted (68,149 explicit boundaries plus 10,621
-mid-function tail-entry wrappers) into 41 chunks plus `ppu_recomp_table.cpp`.
-The first pass used only the `.opd` table (33,091 entries → 71,875 lifted
-functions) and missed indirect-call targets. `find_functions.py` then found
-67,322 boundaries; explicit entries were added for the multi-entry memset/memcpy
-family (`0xA4FD30..0xA4FF30`) and `0xA305B0`, `0xA56F64`, `0xAF2658`.
-`gt6/generated/` is ~450 MB of C++ and is gitignored.
+The current list is the **boundary audit's corrected list**: 70,672 explicit
+boundaries (from 64,134), with 3,512 ends corrected and 8,264 starts added. The
+lifter emitted **75,418 functions** into 41 chunks plus
+`ppu_recomp_table.cpp`. The previous heuristic list produced 78,770 functions;
+the difference is mostly removed over-merges and the extra mid-function
+wrappers that are no longer needed.
 
-`tools/ppu_loader.py` reported 33,091 unique functions; the extra lifted entries
-are internal labels/tail entries, not new source-level functions.
+`tools/setjmp_patch_gt6.py` wraps GT6's real setjmp (`0xB98168`) at 21 call
+sites and rewrites longjmp (`0xB9828C`) so it transfers control to the matching
+host setjmp. Without it the lifted longjmp restores the guest registers and then
+returns to the wrong caller.
+
+`gt6/generated/` is ~450 MB of C++ and is gitignored.
 
 ## Build
 
@@ -127,22 +135,41 @@ mismatch). Both are fixed locally; see `patches/ps3recomp-mingw-seh.patch` and
 - **4 embedded SPU images** were extracted and lifted (108 / 159 / 396 / 626
   functions) and are registered by fingerprint; the build has
   `GT6_ENABLE_SPU=ON`.
-- One unresolved HLE NID: `0xFAA275A4` (`cellSysutilAvconfExt`).
-- A second: `0x2DDBCC0A` (`cellSpurs`, name unknown) and `0x5C832BD7`
-  (`cellUsbd`, name unknown).
-- `cellSpursGetWorkloadFlag` (`0xC765B995`) was missing; `src/stubs.cpp` now
-  returns `spurs+0x60` (the real `wklFlag` offset), and the NID is no longer
-  unresolved.
+- All three remaining boot imports are now implemented in `src/stubs.cpp`:
+  `0x2DDBCC0A` `_cellSpursWorkloadFlagReceiver2`, `0xFAA275A4`
+  `cellVideoOutGetScreenSize`, and `0x5C832BD7` `cellUsbdSetThreadPriority2`.
+  `cellSpursGetWorkloadFlag` (`0xC765B995`) remains as before (`spurs+0x60`).
+  Boot logs show no `unresolved NID` lines.
+- The raw WWS job-manager policy module at guest `0x013FFE00` (12,160 bytes,
+  fingerprint `0x5510DCB89C1E98C2`) is lifted as image id 5 and registered by
+  `gt6_spu_register_pm_clean()`. All eight `cellSpursAddWorkload` calls now log
+  `PM resolved (image=5)`; the policy module runs DMA commands. No workload is
+  kicked because the boot still exits first.
 
-The remaining blocker at this snapshot is a set of **indirect calls into
-mid-function entries** that the OPD list did not cover (memset/memcpy-like
-routines at `0xA4FD30..0xA4FF30`, plus `0xA305B0`, `0xA56F64`, `0xAF2658`). The
-heuristic `find_functions.py` found **67,322** boundaries; the final lift adds
-the whole multi-entry range explicitly. The game currently reaches `main`
-(`0x1096C`), calls the Adhoc/VM init at `0x13BE8`, then checks a byte flag via
-`0x3C0E84`. The flag is 0, so `main` prints `scripts/gt6/main` and returns 0.
-The final relift is meant to remove the unresolved memset/memcpy calls that
-corrupt this init. No frame has been presented yet.
+## Boot stop (corrected 2026-10-31)
+
+The earlier claim that `0xA13644` was an 8-byte leaf getter
+(`lbz r3,0x10(r3); blr`) was **wrong**. The real function is 0x5C bytes: it
+locks the mutex at `0x0164AB50`, calls `0x3C0E84` on the global at `0x0164AB80`,
+unlocks, and returns the low byte. The fake leaf read byte 0x10 of the `HADHOC`
+config string, which produced the bogus `flag=0x40` gate.
+
+With the real function restored, the chain at `0x13BE8` runs **all 15 stages**
+with `flag=0x00` at every check and returns normally. `main` (`0x1096C`) then:
+
+1. calls `0x13830` with `r3 = "scripts/gt6/main"` (`0x00FB0AB8`);
+2. `0x13830` constructs the path string, calls `0xB98168` (`setjmp`, returns 0),
+   loads the manager from `0x01570D58`, and calls its virtual slot
+   `[manager->vtable + 0x120]`;
+3. that dispatches to guest `0x009A7654` (`ctr`), which calls
+   `0x9CDF00 -> 0x9CD798 -> 0x9CC068(this, path, ...)` and **returns 0
+   immediately** — no `cellFs`/`sys_fs` open for `scripts/gt6/main` and no
+   `GT.VOL` open appears in the run;
+4. `main` walks the finalizer list at `0x16A99D0` (head
+   `0x016B0000-0x6630`), returns 0, and the CRT calls `sys_process_exit(0)`.
+
+`YDKJ_NOEXIT=1` only parks the main thread; the other engine threads still
+join/exit. No frame has been presented yet.
 
 ## Asset tools
 
@@ -154,22 +181,26 @@ yet. See `docs/ASSETS.md`.
 
 ## Known issues / risks
 
-1. **Boot-script init flag.** `main` at `0x1096C` runs the init chain at
-   `0x13BE8`; the byte flag returned by `0xA13644` (`obj+0x10`) is 0, so `main`
-   prints `scripts/gt6/main` and returns 0. This is the current stop.
-2. **Remaining HLE NIDs.** `0xFAA275A4` (`cellSysutilAvconfExt`),
-   `0x2DDBCC0A` (`cellSpurs`, name unknown), `0x5C832BD7` (`cellUsbd`, name
-   unknown). `cellSpursGetWorkloadFlag` is now implemented in
-   `gt6/src/stubs.cpp`.
-3. **Static-constructor null calls.** `0x118C8` calls null entries in the
-   constructor/finalizer table (`lr=0x1190C`). Some may be optional; they have
-   not been individually identified.
-4. **`setjmp`/`longjmp` not patched.** GT5P's LZ decoder required a host-side
-   `setjmp` patch. GT6's equivalents have not been located. If the volume reader
-   spins or corrupts memory, this is the first suspect.
+1. **Boot-script dispatch returns immediately.** The real init chain completes
+   with flag 0; `main` calls the script manager at `0x13830` with
+   `"scripts/gt6/main"`, which dispatches to `0x009A7654` and returns 0 without
+   any file open. This is the current stop. `0x9CC068` / `0x9CD798` are the
+   functions to inspect next.
+2. **No remaining unresolved boot NIDs.** The three were implemented and are
+   logged as resolved in `gt6/src/stubs.cpp`.
+3. **Static-constructor walk corrupts `r31`.** `0x118C8` walks the table at
+   `0x1410B48` down to the `-1` terminator at `0x1410000`. The first ~120
+   constructors preserve `r31`; after that it becomes 0 and the walker calls
+   NULL repeatedly. This is being traced with `[ctor] BAD` instrumentation.
+4. **`setjmp`/`longjmp`.** Now patched for GT6's real pair
+   (`0xB98168`/`0xB9828C`) by `tools/setjmp_patch_gt6.py`: 21 setjmp call sites
+   and 14 arming functions. The patch must be re-run after every relift.
 5. **`GT.VOL` path.** The game's own reader must open the volume through the
-   VFS. A hardlink `gt6/GT.VOL` is created for relative opens, and
-   `/dev_bdvd/` is mapped to the extracted `PS3_GAME` tree.
+   VFS. `gt6/src/main.cpp` now resolves every `cellFs` mapping to an absolute
+   host path and sets `ppu_vfs_root` to the game root; before this, cellFs
+   prepended its USRDIR root to the relative mappings and the absolute
+   `/dev_bdvd/PS3_GAME/USRDIR/GT.VOL` open could never land. No GT.VOL open has
+   been observed yet because the constructor/script path still fails first.
 6. **GCM base address.** `GT6_GCM_CTRL_BASE=0x03000000` is inherited from GT5P;
    GT6's heap may use it. If the guest corrupts its allocator, move it.
 7. **No verified GT6 port exists.** Treat any claim of a working GT6 PC port
@@ -177,12 +208,14 @@ yet. See `docs/ASSETS.md`.
 
 ## Next actions
 
-1. Instrument `0x13BE8` / `0xA13644` to find which init step is supposed to set
-   the byte flag, and compare the sequence with an RPCS3 log of the same boot.
-2. Identify `0x2DDBCC0A` (`cellSpurs`) from RPCS3's NID table or the call site at
-   `0xB6E848`; implement it in `gt6/src/stubs.cpp` with the real output layout.
-3. Stub or implement `0xFAA275A4` (`cellSysutilAvconfExt`) and `0x5C832BD7`
-   (`cellUsbd`) with valid outputs.
-4. Once the flag is true, confirm `scripts/gt6/main.adc` opens through
-   `cellFs`/`sys_fs` and that the Adhoc VM starts.
-5. Then move to the RSX first-frame work in M3.
+1. Trace `0x9CC068` / `0x9CD798` / `0x9A7654`: determine why the script-manager
+   call returns 0 without opening `scripts/gt6/main` or `GT.VOL`.
+2. Confirm whether the script load is asynchronous and which worker is supposed
+   to run it; if so, make `main` wait for that worker instead of returning to
+   the CRT.
+3. Apply the boundary audit's corrected function list (but do **not** shorten
+   `0xA13644`; that range is correct) and relift.
+4. Once the boot script opens, capture the next `cellFs`/`sys_fs` stop and the
+   first `GT.VOL` read.
+5. Then move to the RSX first-frame work; the D3D12 backend already initializes
+   at 1280x720 on this machine, and tiles/Zcull/display buffers are configured.

@@ -396,6 +396,7 @@ extern "C" {
     void cellKbInit(void);
     void cellKbEnd(void);
     void cellKbGetData(void);
+    void cellKbRead(void);
     void cellKbGetInfo(void);
     void cellKbSetReadMode(void);
     void cellKbSetCodeType(void);
@@ -1616,6 +1617,7 @@ extern "C" void ppu_hle_register_all(void) {
     ps3_hle_register(0x433F6EC0u, "cellKbInit", (void*)cellKbInit);
     ps3_hle_register(0xBFCE3285u, "cellKbEnd", (void*)cellKbEnd);
     ps3_hle_register(0x16B5D7ACu, "cellKbGetData", (void*)cellKbGetData);
+    ps3_hle_register(0xFF0A21B7u, "cellKbRead", (void*)cellKbRead);
     ps3_hle_register(0x2F1774D5u, "cellKbGetInfo", (void*)cellKbGetInfo);
     ps3_hle_register(0xDEEFDFA7u, "cellKbSetReadMode", (void*)cellKbSetReadMode);
     ps3_hle_register(0xA5F85E4Du, "cellKbSetCodeType", (void*)cellKbSetCodeType);

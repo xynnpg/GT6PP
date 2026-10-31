@@ -1,8 +1,14 @@
 # Re-run the GT6 analysis + PPU lift pipeline.
-# Usage: powershell -ExecutionPolicy Bypass -File scripts/relift-gt6.ps1 [-Jobs 8] [-Chunks 32]
+# Usage: powershell -ExecutionPolicy Bypass -File scripts/relift-gt6.ps1 [-Jobs 8] [-Chunks 40] [-Functions <path>]
+#
+# The lift list is not the raw .opd table. It must include the heuristic and
+# explicit boundaries that make indirect calls resolvable (see docs/STATUS.md).
+# Prefer work/analysis/emain/functions_corrected.json when the boundary audit
+# has produced it; otherwise fall back to functions_final3.json.
 param(
     [int]$Jobs = 8,
-    [int]$Chunks = 32
+    [int]$Chunks = 40,
+    [string]$Functions = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,20 +28,25 @@ if (-not (Test-Path (Join-Path $Sdk "tools\ppu_lifter.py"))) {
 
 New-Item -ItemType Directory -Force -Path $Analysis, $Generated | Out-Null
 
+if (-not $Functions) {
+    $corrected = Join-Path $Analysis "functions_corrected.json"
+    $Functions = if (Test-Path $corrected) { $corrected }
+                 else { Join-Path $Analysis "functions_final3.json" }
+}
+if (-not (Test-Path $Functions)) { throw "Missing function list $Functions" }
+Write-Host "Lift list: $Functions"
+
 Write-Host "[1/4] PPU loader"
 python (Join-Path $Sdk "tools\ppu_loader.py") $Elf -o $Analysis
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "[2/4] filter OPD list to executable addresses"
-python -c "import json; f=json.load(open(r'$($Analysis -replace '\\','/')/EMAIN.functions.json')); g=[x for x in f if int(x['start'],16)<0xF908C4]; json.dump(g,open(r'$($Analysis -replace '\\','/')/functions_code.json','w'),indent=1); print(len(f),'->',len(g))"
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-Write-Host "[3/4] HLE stub map + PPU lift"
+Write-Host "[2/4] HLE stub map"
 python (Join-Path $Gt5p "scripts\gen_hle_stubs.py") $Elf (Join-Path $Analysis "hle_stubs.json")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+Write-Host "[3/4] PPU lift"
 python (Join-Path $Sdk "tools\ppu_lifter.py") $Elf `
-    --functions (Join-Path $Analysis "functions_code.json") `
+    --functions $Functions `
     --hle-stubs (Join-Path $Analysis "hle_stubs.json") `
     --output $Generated `
     --code-end 0xF908C4 `
@@ -45,7 +56,27 @@ python (Join-Path $Sdk "tools\ppu_lifter.py") $Elf `
     --jobs $Jobs
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-Write-Host "[4/4] HLE NID table"
+Write-Host "[4/8] setjmp/longjmp call-site patch"
+python (Join-Path $Root "tools\setjmp_patch_gt6.py") $Generated
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[5/9] post-lift setjmp guards + boot-script hooks"
+python (Join-Path $Root "tools\apply_gt6_post_lift.py") $Generated
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[6/9] .ctors walker r31 preservation"
+python (Join-Path $Root "tools\ctor_walk_patch.py") $Generated
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[7/9] post-lift verification"
+python (Join-Path $Root "tools\post_lift_fixes.py") $Generated
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[8/9] WWS job-manager PM (SPU image id 5)"
+powershell -ExecutionPolicy Bypass -File (Join-Path $Root "scripts\lift-spu-gt6.ps1") -Force
+if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+Write-Host "[9/9] HLE NID table"
 python (Join-Path $Sdk "tools\gen_hle_nids.py") --all --out (Join-Path $Root "gt6\src\gen\ppu_hle_nids.cpp")
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

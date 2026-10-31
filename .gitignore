@@ -1,8 +1,10 @@
-# Game data -- never commit
+# Game data / decrypted assets / keys -- never commit
 PS3-Version/
 gt6/GT.VOL
 *.iso
 *.ISO
+*.vol
+*.VOL
 *.elf
 *.ELF
 *.self
@@ -11,12 +13,19 @@ gt6/GT.VOL
 *.SPRX
 *.pkg
 *.PKG
+*.pup
+*.PUP
 *.rap
 *.RAP
 *.edat
 *.EDAT
 *.bin
 *.BIN
+*.sfo
+*.SFO
+*.zip
+*.7z
+*.rar
 
 # Extracted / decrypted / generated
 work/
@@ -30,6 +39,8 @@ key.json
 VolumeHeader.bin
 VolumeTOC.bin
 log.txt
+# This patch contains hunks of generated recompiled game code.
+patches/gt6-adch-switch-dispatch.patch
 
 # Third-party checkouts and prebuilt tools (fetch with the documented commands)
 third_party/
@@ -54,10 +65,30 @@ venv/
 Thumbs.db
 desktop.ini
 
-# CMake
+# CMake / native build output
 CMakeCache.txt
 CMakeFiles/
 cmake_install.cmake
 compile_commands.json
+*.exe
+*.dll
+*.lib
+*.a
+*.o
+*.obj
+*.pdb
+*.ilk
+*.dmp
+*.map
 
+# Logs / traces / dumps
+*.log
+*.err
+*.trace
+*.bmp
+*.dds
+*.dmp
+
+# Local game trees
 game/
+gamedata/
