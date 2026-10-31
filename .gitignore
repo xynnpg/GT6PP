@@ -49,6 +49,7 @@ tools/RPCS3/
 tools/llvm-mingw/
 tools/ghidra_dl/
 tools/ghidra_10*/
+tools/pkg2zip/
 tools/*.zip
 
 # Python

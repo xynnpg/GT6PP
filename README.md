@@ -32,6 +32,13 @@ powershell -ExecutionPolicy Bypass -File scripts\build-gt6.ps1
 
 The relift pipeline (`scripts/relift-gt6.ps1`) regenerates `gt6/generated/`.
 
+## Tooling
+
+- `tools/GTToolsSharp/` — GT.VOL listing/extraction.
+- Ghidra 10.4 headless + `tools/ghidra_scripts/DecompileAt.java` — targeted PPU/SPU decompilation.
+- `tools/ghidra-reverse` / `binary-analysis-patterns` agent skills.
+- Details and restrictions: [docs/TOOLING.md](docs/TOOLING.md).
+
 ## What works
 
 | Area | State |

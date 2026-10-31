@@ -38,6 +38,12 @@ Installed globally in `~/.agents/skills/`:
 - `binary-analysis-patterns` — disassembly/decompilation/CFG checklists.
 - `ghidra-reverse` — Ghidra headless workflow and decompilation.
 
+## PKG update extraction (optional)
+
+`tools/pkg2zip/pkg2zip.exe` (MIT) is installed for the official GT6 update PKG
+you supply. It is not used on the v1.00 disc. After extracting
+`Prototypes.adc`, install it with `tools/gt6_install_companion_script.py`.
+
 ## Restricted sources (do not use)
 
 - `third_party/PDTools/AGENTS.md` prohibits AI/LLM use of that repository.
