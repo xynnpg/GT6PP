@@ -1,0 +1,371 @@
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index f73907c..9510e14 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -88,6 +88,7 @@ extern "C" const char* ppu_vfs_root = ".";
+ #define CELL_FS_ENOENT       (-2147418106)   /* 0x80010006 -- was -2147418090, which is 0x80010016 = CELL_ENOTCONN, not ENOENT */
+ #define CELL_FS_EISDIR       (-2147418094)   /* 0x80010012 */
+ #define CELL_FS_EIO          (-2147418111)
++#define CELL_FS_EFAULT       (-2147418099)   /* 0x8001000D */
+ #define CELL_FS_ENOSYS       (-2147418109)   /* 0x80010003 */
+ #define CELL_FS_S_IFDIR      0x4000u
+ #define CELL_FS_S_IFREG      0x8000u
+@@ -111,6 +112,35 @@ extern "C" const char* ppu_vfs_root = ".";
+ #define CELL_FS_TYPE_DIR     1
+ #define CELL_FS_TYPE_REG     2
+ 
++/* ---- PDIPFS cache diagnostics --------------------------------------------
++ *
++ * GT6's PDIPFS cache lives beside the game data and consists of a data file
++ * ("<key>.fdupi" while it is being built, then "<key>" after completion) and
++ * an 8 KiB+ block map ("<key>.fdupm").  The guest opens both through cellFs.
++ * GT6_PFS_CACHE_TRACE=1 logs every cellFs operation on those paths, including
++ * the guest return address, so "was the block write issued?" can be answered
++ * without a generated-code patch.  Off by default: the normal [fs] logging is
++ * already noisy enough.
++ */
++static int pfs_cache_trace(void)
++{
++    static int on = -1;
++    if (on < 0) {
++        const char* e = getenv("GT6_PFS_CACHE_TRACE");
++        on = (e && *e && *e != '0') ? 1 : 0;
++    }
++    return on;
++}
++
++static int fs_is_cache_path(const char* p)
++{
++    if (!p || !*p) return 0;
++    if (strstr(p, "PDIPFS")) return 1;
++    size_t n = strlen(p);
++    return (n >= 6 && (strcmp(p + n - 6, ".fdupi") == 0 ||
++                       strcmp(p + n - 6, ".fdupm") == 0));
++}
++
+ /* ---- guest memory string helpers ---- */
+ static void guest_strcpy(char* dst, uint32_t gaddr, size_t cap)
+ {
+@@ -325,6 +355,9 @@ static void cellFsOpen(ppu_context* ctx)
+      * movies) is diagnosed from the opener: its sibling read path is the one
+      * that is not running. */
+     if (fd >= 0 && fd < FS_MAX) { strncpy(g_fd_path[fd], gpath, sizeof g_fd_path[fd]-1); g_fd_path[fd][sizeof g_fd_path[fd]-1]=0; }
++    if (pfs_cache_trace() && fs_is_cache_path(gpath))
++        fprintf(stderr, "[pfscache] open '%s' flags=0x%X -> fd=%d lr=0x%08X\n",
++                gpath, flags, fd, (uint32_t)ctx->lr);
+     { char who[64] = "?";
+       if (getenv("FS_CALLER")) { ppu_guest_caller(who, sizeof who);
+           fprintf(stderr, "[fs] open '%s' -> fd %d  (opened by %s)\n", gpath, fd, who);
+@@ -443,6 +476,15 @@ static void cellFsClose(ppu_context* ctx)
+         f = g_files[fd];
+         if (f) {
+             if (g_fd_usm[fd] && getenv("PS3_FSLOG_READS")) fprintf(stderr, "[USMRD] CLOSE usm fd=%d\n", fd);
++            if (pfs_cache_trace() && fs_is_cache_path(g_fd_path[fd])) {
++                fflush(f);
++                long pos = ftell(f);
++                FS_SEEK64(f, 0, SEEK_END);
++                long sz = (long)FS_TELL64(f);
++                if (pos >= 0) FS_SEEK64(f, pos, SEEK_SET);
++                fprintf(stderr, "[pfscache] close fd=%d '%s' size=%ld lr=0x%08X\n",
++                        fd, g_fd_path[fd], sz, (uint32_t)ctx->lr);
++            }
+             __atomic_store_n(&g_files[fd], (FILE*)nullptr, __ATOMIC_RELEASE);
+             g_fd_usm[fd] = 0; g_fd_dir[fd] = 0;
+         }
+@@ -480,7 +522,12 @@ static void cellFsRead(ppu_context* ctx)
+     uint64_t nbytes = ctx->gpr[5];
+     uint32_t nread_ptr = (uint32_t)ctx->gpr[6];
+     FILE* f = fd_file(fd);
+-    if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    if (!f) {
++        if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++            fprintf(stderr, "[pfscache] read fd=%d '%s' -> EBADF (closed?) lr=0x%08X\n",
++                    fd, g_fd_path[fd], (uint32_t)ctx->lr);
++        ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return;
++    }
+     uint64_t raw_nbytes = ctx->gpr[5];
+     long fpos_before = ftell(f);
+     if (ppu_vm_size && (uint64_t)buf + nbytes > ppu_vm_size) nbytes = ppu_vm_size - buf;
+@@ -542,6 +589,10 @@ static void cellFsRead(ppu_context* ctx)
+         }
+     }
+     if (nread_ptr) vm_write64(nread_ptr, n);
++    if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++        fprintf(stderr, "[pfscache] read fd=%d '%s' nbytes=%llu -> %zu pos=%ld lr=0x%08X\n",
++                fd, g_fd_path[fd], (unsigned long long)nbytes, n,
++                (long)fpos_before, (uint32_t)ctx->lr);
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
+@@ -552,10 +603,35 @@ static void cellFsWrite(ppu_context* ctx)
+     uint64_t nbytes = ctx->gpr[5];
+     uint32_t nwr_ptr = (uint32_t)ctx->gpr[6];
+     FILE* f = fd_file(fd);
+-    if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    if (!f) {
++        if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++            fprintf(stderr, "[pfscache] write fd=%d '%s' nbytes=%llu -> EBADF (closed?) lr=0x%08X\n",
++                    fd, g_fd_path[fd], (unsigned long long)nbytes, (uint32_t)ctx->lr);
++        ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return;
++    }
+     fs_prefault(buf, nbytes);   /* kernel READS the buffer; same reserved-page trap */
+     fs_set_dir(fd, f, 2);
+     size_t n = fwrite(vm_base + buf, 1, (size_t)nbytes, f);
++    /* PDIPFS data/map writes must be durable before the guest can mark a block
++     * valid.  stdio would otherwise hold the 8 KiB block until close/exit, and
++     * a later fault would leave .fdupi at 0 bytes with a "written" bitmap.
++     * Flushing only the cache paths keeps the hot generic path untouched. */
++    { const int cache_fd = (fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]));
++      if (cache_fd) {
++          fflush(f);
++          if (getenv("GT6_PFS_CACHE_FSYNC")) {
++#ifdef _WIN32
++              _commit(_fileno(f));
++#else
++              fsync(fileno(f));
++#endif
++          }
++      }
++      if (pfs_cache_trace() && cache_fd)
++          fprintf(stderr, "[pfscache] write fd=%d '%s' nbytes=%llu -> %zu lr=0x%08X%s\n",
++                  fd, g_fd_path[fd], (unsigned long long)nbytes, n,
++                  (uint32_t)ctx->lr, n == nbytes ? "" : "  SHORT");
++    }
+     /* DIAGNOSTIC (PS3_FSLOG_BT=1): dump the guest back-chain when the game logs the
+      * render-config failure, to locate setScreenRenderTargetInternal & the config obj. */
+     if (getenv("PS3_FSLOG_BT") && buf && nbytes > 0 && nbytes < 4096 && vm_base) {
+@@ -641,6 +717,9 @@ static void cellFsLseek(ppu_context* ctx)
+     FS_SEEK64(f, off, worigin);
+     int64_t p = FS_TELL64(f);
+     if (pos_ptr) vm_write64(pos_ptr, (uint64_t)p);
++    if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++        fprintf(stderr, "[pfscache] lseek fd=%d '%s' off=%lld whence=%u -> pos=%lld lr=0x%08X\n",
++                fd, g_fd_path[fd], (long long)off, wh, (long long)p, (uint32_t)ctx->lr);
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
+@@ -676,6 +755,9 @@ static void cellFsStat(ppu_context* ctx)
+         ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_ENOENT; return;
+     }
+     if (getenv("PS3_FSLOG")) fprintf(stderr, "[fs] stat '%s' -> OK (size=%lld)\n", gpath, (long long)st.st_size);
++    if (pfs_cache_trace() && fs_is_cache_path(gpath))
++        fprintf(stderr, "[pfscache] stat '%s' -> size=%lld lr=0x%08X\n",
++                gpath, (long long)st.st_size, (uint32_t)ctx->lr);
+     uint32_t mode = (st.st_mode & S_IFDIR) ? (CELL_FS_S_IFDIR | 0x1FF)
+                                            : (CELL_FS_S_IFREG | 0x1B6);
+     if (sb) write_stat(sb, mode, (uint64_t)st.st_size);
+@@ -709,6 +791,9 @@ static void cellFsFstat(ppu_context* ctx)
+               sz = c; } } }
+     if (sb) write_stat(sb, CELL_FS_S_IFREG | 0x1B6, (uint64_t)sz);
+     if (getenv("PS3_FSLOG")) { static int _n=0; if(PS3_LOG_FIRST(_n, 12)) fprintf(stderr,"[FSDBG] cellFsFstat(fd=%d) -> size=0x%llX\n",fd,(unsigned long long)sz); }
++    if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++        fprintf(stderr, "[pfscache] fstat fd=%d '%s' size=%lld lr=0x%08X\n",
++                fd, g_fd_path[fd], (long long)sz, (uint32_t)ctx->lr);
+     ctx->gpr[3] = CELL_OK;
+ }
+ 
+@@ -854,16 +939,181 @@ static void cellFsMkdir(ppu_context* ctx)
+     ctx->gpr[3] = CELL_OK;   /* existing dir is benign for boot */
+ }
+ static void cellFsRmdir(ppu_context* ctx)  { ctx->gpr[3] = CELL_OK; }
+-static void cellFsUnlink(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
++static void cellFsUnlink(ppu_context* ctx)
++{
++    char gpath[1024], hpath[1100];
++    guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
++    host_path(hpath, sizeof hpath, gpath);
++    int r = remove(hpath);
++    int err = errno;
++    if (pfs_cache_trace() && fs_is_cache_path(gpath))
++        fprintf(stderr, "[pfscache] unlink '%s' -> %s lr=0x%08X\n",
++                gpath, r == 0 ? "OK" : strerror(err), (uint32_t)ctx->lr);
++    /* Deleting a file that is already gone is what the guest's cache cleanup
++     * expects.  Windows also refuses to remove a file that another handle has
++     * open (EACCES/EBUSY); PS3 cellFs unlink can succeed there, and the cache
++     * cleanup treats failure as fatal, so report success and leave the file for
++     * the completion rename / next boot. */
++    ctx->gpr[3] = (r == 0 || err == ENOENT || err == EACCES || err == EBUSY)
++                      ? CELL_OK : (uint64_t)(int64_t)CELL_FS_EIO;
++}
++
++static void fs_parent_dir(char* out, size_t cap, const char* path);
++
++/* cellFsRename(from, to): the PDIPFS completion marker.  0xA3F6B4 uses this to
++ * turn "<key>.fdupi" into "<key>" after every block is present; a no-op here
++ * leaves the cache permanently "incomplete" and the next boot rebuilds it. */
++static void cellFsRename(ppu_context* ctx)
++{
++    char gfrom[1024], gto[1024], hfrom[1100], hto[1100];
++    guest_strcpy(gfrom, (uint32_t)ctx->gpr[3], sizeof gfrom);
++    guest_strcpy(gto,   (uint32_t)ctx->gpr[4], sizeof gto);
++    host_path(hfrom, sizeof hfrom, gfrom);
++    host_path(hto,   sizeof hto,   gto);
++
++    char parent[1100];
++    fs_parent_dir(parent, sizeof parent, hto);
++    if (parent[0]) host_mkdir_p(parent);
++
++    /* POSIX rename replaces the destination; the Windows CRT rename refuses to
++     * when it exists.  A completed cache from an older run is exactly that
++     * case, so remove the stale destination first. */
++    struct stat st;
++    if (stat(hto, &st) == 0) remove(hto);
++    int r = rename(hfrom, hto);
++    int err = errno;
++    if (pfs_cache_trace() && (fs_is_cache_path(gfrom) || fs_is_cache_path(gto)))
++        fprintf(stderr, "[pfscache] rename '%s' -> '%s' %s (errno=%d) lr=0x%08X\n",
++                gfrom, gto, r == 0 ? "OK" : "FAIL", err, (uint32_t)ctx->lr);
++    ctx->gpr[3] = r == 0 ? CELL_OK : (uint64_t)(int64_t)CELL_FS_ENOENT;
++}
++
+ static void cellFsFsync(ppu_context* ctx)
+ {
+     int fd = (int)(uint32_t)ctx->gpr[3];
+-    if (FILE* f = fd_file(fd)) fflush(f);
++    if (FILE* f = fd_file(fd)) {
++        fflush(f);
++#ifdef _WIN32
++        _commit(_fileno(f));
++#else
++        fsync(fileno(f));
++#endif
++    }
+     ctx->gpr[3] = CELL_OK;
+ }
+-/* File-area preallocation (LBP cache warm-up spams this): host filesystems
+- * grow files on write, so accepting is correct -- no preallocation needed. */
+-static void cellFsAllocateFileAreaWithoutZeroFill(ppu_context* ctx) { ctx->gpr[3] = CELL_OK; }
++
++/* ---- truncate / preallocate ------------------------------------------------
++ *
++ * cellFsAllocateFileAreaWithoutZeroFill(path, size) and cellFsTruncate(path,
++ * size) both size an existing (or newly created) file.  The old no-op was a
++ * fidelity bug for the PDIPFS cache: 0xA42020 opens "<key>.fdupi" with
++ * O_RDWR|O_CREAT and immediately calls 0xA420A8 -> 0xF924B0 (NID 0x7A0329A1)
++ * to size it to the stored stream length.  The cache writer itself appends at
++ * block offsets, so the no-op does not by itself explain an empty block map --
++ * but it leaves the data file the wrong length/state and it makes the HLE lie
++ * about a call that has real semantics.
++ *
++ * "Without zero fill" cannot be expressed on a normal host filesystem when a
++ * file is extended (the tail reads as zeroes anyway).  Use ftruncate/_chsize_s:
++ * existing bytes are preserved, the size is exact, and nothing is fabricated.
++ * Prefer the guest's already-open FILE* so Windows sharing does not reject the
++ * second open. */
++static void fs_parent_dir(char* out, size_t cap, const char* path)
++{
++    snprintf(out, cap, "%s", path);
++    char* slash = strrchr(out, '/');
++    char* bslash = strrchr(out, '\\');
++    char* p = bslash ? bslash : slash;
++    if (slash && (!p || slash > p)) p = slash;
++    if (p) *p = 0;
++}
++
++static FILE* fs_find_open(const char* gpath)
++{
++    for (int i = 3; i < FS_MAX; i++) {
++        FILE* f = fd_file(i);
++        if (f && strcmp(g_fd_path[i], gpath) == 0) return f;
++    }
++    return nullptr;
++}
++
++static int fs_truncate_guest_path(const char* gpath, uint64_t size)
++{
++    char hpath[1100];
++    host_path(hpath, sizeof hpath, gpath);
++
++    if (FILE* f = fs_find_open(gpath)) {
++        fflush(f);
++#ifdef _WIN32
++        if (_chsize_s(_fileno(f), (long long)size) == 0) return 0;
++#else
++        if (ftruncate(fileno(f), (off_t)size) == 0) return 0;
++#endif
++        /* The guest may hold this path read-only; fall through to a writable
++         * open rather than turning a valid path truncate into a failure. */
++    }
++
++    char parent[1100];
++    fs_parent_dir(parent, sizeof parent, hpath);
++    if (parent[0]) host_mkdir_p(parent);
++
++    int hfd = open(hpath, O_RDWR | O_CREAT | O_BINARY, 0666);
++    if (hfd < 0) return -1;
++#ifdef _WIN32
++    int rc = _chsize_s(hfd, (long long)size);
++#else
++    int rc = ftruncate(hfd, (off_t)size);
++#endif
++    close(hfd);
++    return rc == 0 ? 0 : -1;
++}
++
++static void cellFsAllocateFileAreaWithoutZeroFill(ppu_context* ctx)
++{
++    char gpath[1024];
++    guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
++    uint64_t size = ctx->gpr[4];
++    int r = fs_truncate_guest_path(gpath, size);
++    int err = errno;
++    if (pfs_cache_trace() && fs_is_cache_path(gpath))
++        fprintf(stderr, "[pfscache] allocate '%s' size=0x%llX -> %s lr=0x%08X\n",
++                gpath, (unsigned long long)size, r == 0 ? "OK" : strerror(err),
++                (uint32_t)ctx->lr);
++    ctx->gpr[3] = r == 0 ? CELL_OK : (uint64_t)(int64_t)CELL_FS_ENOENT;
++}
++
++static void cellFsTruncate(ppu_context* ctx)
++{
++    char gpath[1024];
++    guest_strcpy(gpath, (uint32_t)ctx->gpr[3], sizeof gpath);
++    uint64_t size = ctx->gpr[4];
++    int r = fs_truncate_guest_path(gpath, size);
++    int err = errno;
++    if (pfs_cache_trace() && fs_is_cache_path(gpath))
++        fprintf(stderr, "[pfscache] truncate '%s' size=0x%llX -> %s lr=0x%08X\n",
++                gpath, (unsigned long long)size, r == 0 ? "OK" : strerror(err),
++                (uint32_t)ctx->lr);
++    ctx->gpr[3] = r == 0 ? CELL_OK : (uint64_t)(int64_t)CELL_FS_ENOENT;
++}
++
++static void cellFsFtruncate(ppu_context* ctx)
++{
++    int fd = (int)(uint32_t)ctx->gpr[3];
++    uint64_t size = ctx->gpr[4];
++    FILE* f = fd_file(fd);
++    if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EIO; return; }
++    fflush(f);
++#ifdef _WIN32
++    int rc = _chsize_s(_fileno(f), (long long)size);
++#else
++    int rc = ftruncate(fileno(f), (off_t)size);
++#endif
++    if (pfs_cache_trace() && fd >= 0 && fd < FS_MAX && fs_is_cache_path(g_fd_path[fd]))
++        fprintf(stderr, "[pfscache] ftruncate fd=%d '%s' size=0x%llX -> %s lr=0x%08X\n",
++                fd, g_fd_path[fd], (unsigned long long)size,
++                rc == 0 ? "OK" : "FAIL", (uint32_t)ctx->lr);
++    ctx->gpr[3] = rc == 0 ? CELL_OK : (uint64_t)(int64_t)CELL_FS_EIO;
++}
+ 
+ /* Free space for (path, u32* block_size, u64* free_block_count). Unregistered,
+  * the call took the unresolved-NID path: CELL_OK with both out-params left as
+@@ -1005,8 +1255,15 @@ extern "C" void ppu_fs_register(void)
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsChmod"),         "cellFsChmod",         cellFsChmod);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsUtime"),         "cellFsUtime",         cellFsUtime);
+     ps3_hle_register_ctx(ps3_compute_nid("cellFsSdataOpenByFd"), "cellFsSdataOpenByFd", cellFsSdataOpenByFd);
+-    ps3_hle_register_ctx(ps3_compute_nid("cellFsAllocateFileAreaWithoutZeroFill"),
+-                         "cellFsAllocateFileAreaWithoutZeroFill", cellFsAllocateFileAreaWithoutZeroFill);
++    /* Literal import NIDs: these are the four that GT6's cache constructor and
++     * completion path import (0xA420A8, 0xA40E4C, 0xA3F728).  Registering the
++     * literal value also guards against a future compute_nid/friendly-name
++     * mismatch leaving the call on the unresolved-NID no-op path. */
++    ps3_hle_register_ctx(0x7A0329A1u, "cellFsAllocateFileAreaWithoutZeroFill",
++                         cellFsAllocateFileAreaWithoutZeroFill);
++    ps3_hle_register_ctx(0xC9DC3AC5u, "cellFsTruncate",  cellFsTruncate);
++    ps3_hle_register_ctx(0x0E2939E5u, "cellFsFtruncate", cellFsFtruncate);
++    ps3_hle_register_ctx(0xF12EECC8u, "cellFsRename",    cellFsRename);
+     /* AIO by literal import NID -- ps3_compute_nid() of the friendly name does
+      * not match the exported symbols. */
+     ps3_hle_register_ctx(0xDB869F20u, "cellFsAioInit",   cellFsAioInit);

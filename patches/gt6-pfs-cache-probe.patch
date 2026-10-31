@@ -1,0 +1,75 @@
+--- a/gt6/generated/ppu_recomp_022.cpp
++++ b/gt6/generated/ppu_recomp_022.cpp
+@@ -150748,8 +150748,11 @@
+         ctx->gpr[6] = ctx->gpr[26] | ctx->gpr[26];
+         ctx->gpr[3] = ctx->gpr[30] | ctx->gpr[30];
+         ctx->gpr[7] = (int64_t)(int32_t)(0);
+         ctx->lr = 0x009FDC60; func_00A422A0(ctx); DRAIN_TRAMPOLINE(ctx);
++        fprintf(stderr, "[pfscache] 0x9FDC5C attach path=0x%08X size=0x%llX id=0x%llX base=0x%llX\n",
++                (unsigned)ctx->gpr[4], (unsigned long long)ctx->gpr[5],
++                (unsigned long long)ctx->gpr[6], (unsigned long long)ctx->gpr[7]);
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int64_t)0; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 0)) | (cr_val << 0); }
+         if ((!((ctx->cr >> 1) & 1))) goto loc_009FDD14;
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x14E << 16);
+         ctx->gpr[5] = (int64_t)(int32_t)ctx->gpr[22];
+--- a/gt6/generated/ppu_recomp_023.cpp
++++ b/gt6/generated/ppu_recomp_023.cpp
+@@ -95002,8 +95002,11 @@
+ }
+ 
+ void func_00A40984(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[pfscache] 0xA40984 write cache=0x%08X size=0x%llX block=%u off=%u len=%u\n",
++                (unsigned)ctx->gpr[3], (unsigned long long)vm_read64(ctx->gpr[3] + 0x10),
++                (unsigned)ctx->gpr[4], (unsigned)ctx->gpr[5], (unsigned)ctx->gpr[6]);
+         uint64_t _cs_29 = ctx->gpr[29];
+         uint64_t _cs_30 = ctx->gpr[30];
+         uint64_t _cs_31 = ctx->gpr[31];
+         vm_write64(ctx->gpr[1] + -0x90, ctx->gpr[1]); ctx->gpr[1] += -0x90;
+@@ -95470,8 +95473,11 @@
+ }
+ 
+ void func_00A40FBC(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[pfscache] 0xA40FBC read file=0x%08X off=0x%llX len=0x%llX\n",
++                (unsigned)ctx->gpr[3], (unsigned long long)ctx->gpr[5],
++                (unsigned long long)ctx->gpr[6]);
+         uint64_t _cs_14 = ctx->gpr[14];
+         uint64_t _cs_15 = ctx->gpr[15];
+         uint64_t _cs_16 = ctx->gpr[16];
+         uint64_t _cs_17 = ctx->gpr[17];
+@@ -96685,8 +96691,12 @@
+         ctx->gpr[11] = ctx->gpr[3] | ctx->gpr[3];
+         if (((ctx->cr >> 1) & 1)) goto loc_00A41F50;
+         goto loc_00A41FF4;
+ loc_00A41FEC:
++        fprintf(stderr, "[pfscache] 0xA41FEC map loaded blocks=%u size=0x%llX id=0x%llX\n",
++                (unsigned)vm_read32(ctx->gpr[1] + 0x80),
++                (unsigned long long)vm_read64(ctx->gpr[1] + 0x70),
++                (unsigned long long)vm_read64(ctx->gpr[1] + 0x78));
+         ctx->gpr[0] = vm_read32(ctx->gpr[1] + 0x80);
+         vm_write32(ctx->gpr[30] + 0x20, ctx->gpr[0]);
+ loc_00A41FF4:
+         ctx->gpr[0] = vm_read64(ctx->gpr[1] + 0x180);
+@@ -96744,8 +96754,10 @@
+ loc_00A420A0:
+         ctx->gpr[4] = ctx->gpr[29] | ctx->gpr[29];
+         ctx->gpr[3] = ctx->gpr[30] | ctx->gpr[30];
+         ctx->lr = 0x00A420AC; func_00F924B0(ctx); DRAIN_TRAMPOLINE(ctx);
++        fprintf(stderr, "[pfscache] 0xA420AC allocate size=0x%llX -> 0x%08X\n",
++                (unsigned long long)ctx->gpr[29], (unsigned)ctx->gpr[3]);
+         { int64_t a = (int32_t)ctx->gpr[3]; int64_t b = (int32_t)ctx->gpr[28]; uint32_t cr_val = ((a < b) ? 8 : (a > b) ? 4 : 2) | ((ctx->xer >> 31) & 1u); ctx->cr = (ctx->cr & ~(0xFu << 0)) | (cr_val << 0); }
+         ctx->gpr[31] = ctx->gpr[3] | ctx->gpr[3];
+         if ((!((ctx->cr >> 1) & 1))) goto loc_00A420E0;
+         ctx->lr = 0x00A420BC; func_00A2F328(ctx); DRAIN_TRAMPOLINE(ctx);
+@@ -96772,8 +96784,10 @@
+ }
+ 
+ void func_00A42108(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[pfscache] 0xA42108 attach size=0x%llX id=0x%llX path=0x%08X\n",
++                (unsigned long long)ctx->gpr[5], (unsigned long long)ctx->gpr[6], (unsigned)ctx->gpr[4]);
+         uint64_t _cs_23 = ctx->gpr[23];
+         uint64_t _cs_24 = ctx->gpr[24];
+         uint64_t _cs_25 = ctx->gpr[25];
+         uint64_t _cs_26 = ctx->gpr[26];

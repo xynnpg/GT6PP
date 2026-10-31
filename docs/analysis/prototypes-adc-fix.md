@@ -264,6 +264,35 @@ because a node/child was zeroed, a bucket was cleared, or the registry was
 destroyed/corrupted later. Do **not** patch `0x9E191C` to accept NULL; the
 node flag is the only sentinel test in this custom tree.
 
+### 5.1 `0x15D5F68` is the built-in type map, not the prototype class table
+
+The Ghidra output confirms the two maps are different:
+
+- `value_compare` (`0x9E191C`) walks `*(uint *)(map + 0x6c)` and tests the
+  node byte at `+0x19`.
+- `0x9E2428` constructs the map and tail-calls `0x9E1E94(map, 1)`. That
+  routine inserts the built-in type objects (the `Short`, `Int`, `Long`,
+  `UByte`, ... strings at `0x10961E8..0x1096250`) through
+  `0xF448B4` at `0x9E208C`/`0x9E2160`. It does not read `.adc` and does not
+  call `registerPrimitives`.
+- `registerPrimitives` (`0x5F65B0`) calls `0x5F612C` at `0x5F6618` with the
+  project object. `0x5F612C` iterates the project class list and calls
+  `0x5F5790(project, 0x22, class_name, ...)` at `0x5F6300`.
+  `0x5F5790` looks the class up with `0x5F31A4` at `0x5F57F4`; on a miss it
+  creates the class object (`0x5D8FAC`/`0x5D911C`) and calls `0xDFFEF0` at
+  `0x5F59B0`, which inserts into a map whose sentinel byte is at **`+0x21`**
+  (`0xDFFFB4`), not `+0x19`. It never references `0x15D5F68`.
+- `project_loader` (`0x5FABF0`) does call `0x988FF0(&out, key)` at
+  `0x5FAC34`, which is the `0x15D5F68` map lookup/insert helper. That is the
+  project-path cache lookup, not class registration.
+
+Therefore an empty `0x15D5F68` tree is **not** explained by the missing
+`Prototypes.adc` or by a skipped `registerPrimitives` call. `registerPrimitives`
+is reached from `MenuClassDefine.adc` line 178 and populates the separate
+project/class map; the `+0x19` map is the built-in type registry and is
+populated by its static constructor. The `+0x19` null must be treated as a
+later corruption/clear and A/B'd separately.
+
 The measured chronology does not make the `.adc` failure the immediate
 trigger:
 
