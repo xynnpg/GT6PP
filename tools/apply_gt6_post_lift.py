@@ -73,6 +73,11 @@ def add_script_hooks(root: Path) -> int:
         'extern "C" int gt6_script_read_override(ppu_context* ctx);\n'
         'extern "C" int gt6_script_seek_override(ppu_context* ctx);\n'
         'extern "C" int gt6_script_override_active(void);\n'
+        'extern "C" void gt6_pfs_host_open_prepare(uint32_t path_ea, uint32_t file_ea);\n'
+        'extern "C" void gt6_pfs_host_open_commit(uint32_t file_ea, uint32_t ret_ea);\n'
+        'extern "C" int gt6_pfs_stream_read_override(ppu_context* ctx);\n'
+        'extern "C" int gt6_pfs_stream_seek_override(ppu_context* ctx);\n'
+        'extern "C" int gt6_pfs_stream_tell_override(ppu_context* ctx);\n'
     )
     if inc in s:
         missing = "".join(
@@ -86,6 +91,11 @@ def add_script_hooks(root: Path) -> int:
         ("func_009BB020", "if (gt6_script_read_override(ctx)) return;\n"),
         ("func_009BB11C", "gt6_script_path_hint((uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4]);\n"),
         ("func_009BAFE0", "if (gt6_script_seek_override(ctx)) return;\n"),
+        # FileStream helpers used by the host-font loader and other
+        # non-HFileReader readers (see docs/analysis/host-font-sync-fix.md).
+        ("func_009F4AA0", "if (gt6_pfs_stream_read_override(ctx)) return;\n"),
+        ("func_009F49D8", "if (gt6_pfs_stream_seek_override(ctx)) return;\n"),
+        ("func_009F4930", "if (gt6_pfs_stream_tell_override(ctx)) return;\n"),
     ):
         key = f"void {name}(ppu_context* ctx) {{\n    PPU_MM_SNAP\n"
         if s.count(key) == 1 and hook not in s:
@@ -164,6 +174,43 @@ def add_boot_presents_hooks(root: Path) -> int:
     return changed
 
 
+def add_host_open_wrapper(root: Path) -> int:
+    """Wrap 0x9F8E40 so the host open is keyed by its returned FileObject.
+
+    See docs/analysis/host-font-sync-fix.md.  r3 is the guest path string and
+    r4 is the FileObject (also the success return).  0x9F4AA0 reads through
+    that FileObject, so a slot keyed by r4 is what the read override matches.
+    """
+    path = root / "ppu_recomp_022.cpp"
+    if not path.exists():
+        return 0
+    s = path.read_text(encoding="latin-1")
+    define = "void func_009F8E40(ppu_context* ctx) {"
+    orig = "void gt6_orig_func_009F8E40(ppu_context* ctx) {"
+    if orig in s:
+        return 0
+    if s.count(define) != 1:
+        print("warning: func_009F8E40 not found exactly once", file=sys.stderr)
+        return 0
+    s = s.replace(define, orig, 1)
+    s += (
+        "\n/* Host-open wrapper (0x9F8E40), see docs/analysis/host-font-sync-fix.md.\n"
+        " * r3 = guest path, r4 = FileObject (also the success return).  The\n"
+        " * extracted-file slot is keyed by that FileObject and served by\n"
+        " * gt6_pfs_stream_read_override() at 0x9F4AA0. */\n"
+        "void func_009F8E40(ppu_context* ctx)\n"
+        "{\n"
+        "    const uint32_t _path = (uint32_t)ctx->gpr[3];\n"
+        "    const uint32_t _file = (uint32_t)ctx->gpr[4];\n"
+        "    gt6_pfs_host_open_prepare(_path, _file);\n"
+        "    gt6_orig_func_009F8E40(ctx);\n"
+        "    gt6_pfs_host_open_commit(_file, (uint32_t)ctx->gpr[3]);\n"
+        "}\n"
+    )
+    path.write_text(s, encoding="latin-1")
+    return 1
+
+
 def patch_filedevice_flush(root: Path) -> int:
     """Stop PDIPSX::FileDeviceHost from publishing/dereferencing a dead stack
     FileInternalStreamDefault (guest 0x00A08A74 / 0x00A08B8C).
@@ -233,10 +280,12 @@ def main(argv: list[str]) -> int:
     guards = add_setjmp_guards(root)
     hooks = add_script_hooks(root)
     boot_hooks = add_boot_presents_hooks(root)
+    host_open = add_host_open_wrapper(root)
     adch = patch_adch_switch(root)
     filedev_changes = patch_filedevice_flush(root)
     print(f"post-lift: setjmp guards added {guards}; script hooks changed {hooks}; "
           f"boot/presents hooks changed {boot_hooks}; "
+          f"host-open wrappers {host_open}; "
           f"ADCH switch changes {adch}; FileDeviceHost changes {filedev_changes}")
     return 0
 

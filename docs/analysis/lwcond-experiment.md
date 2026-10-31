@@ -1,5 +1,12 @@
 # lwcond qid/pending experiment — no frame yet
 
+> **Superseded (2026-10-31):** the semaphore/pending path was replaced by the
+> generation-based lwcond ported from `soyjxck/ps3recomp` (the Drakengard 3
+> fork). See `docs/analysis/lwcond-trace-fix.md` and
+> `patches/ps3recomp-lwcond-generation.patch`. The qid identity is retained;
+> `pending` and the semaphore wait are gone. This file is kept as the failed
+> experiment's evidence.
+
 **Date:** 2026-10-31
 **Branch:** `opus/boot-frame-3` (from main `447fa03`)
 **Status:** experimental; **do not merge as a fix.** No visible game frame was

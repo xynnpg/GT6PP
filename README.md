@@ -2,7 +2,7 @@
 
 Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. The game runs as a native x86-64 executable - no emulator at runtime.
 
-**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads the UI scripts and presents a 1280x720 window. **First real guest draw submitted** (`draws: 1`) - it is a full-screen black cover, so the visible frame is still black.
+**Status:** boots, parses the full 857,518-byte `ADCH` boot script, loads the UI scripts and presents a 1280x720 window. **The font/file-worker gate is now passed** (generation-based lwcond + synchronous host-font reads): `MenuClassDefine`, `cursor.mproject`/`cursor.adc`, `K/W2`, and the `arcade`/`option`/`gtmode`/`garage`/`gtauto` menu packages load. `MGOM.start` fires and sets the boot-project request. **The real frame is still the black cover**; the next gate is the boot-project handoff (`boot.adc` / `PresentsRootSCEA`).
 
 **Where the first image comes from:** the RPCS3 oracle runs `boot.adc` -> `presents_sequence_common` -> `PresentsRootSCEA` (`K/WD`): `scei` 2 s, `notice` 2 s, `epilepsy` 4 s, then the intro. The native port currently jumps to the later cursor/menu scripts and never opens `K/LH`, `K/KG`, `K/IE`, `K/WD` or the boot fonts. That boot/presents path is the first-screen blocker - not `K/W2`.
 

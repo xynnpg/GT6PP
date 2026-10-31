@@ -42,6 +42,7 @@
 extern "C" {
 void     vm_write8(uint64_t addr, uint8_t val);
 void     vm_write32(uint64_t addr, uint32_t val);
+void     vm_write64(uint64_t addr, uint64_t val);
 uint8_t  vm_read8(uint64_t addr);
 uint32_t vm_read32(uint64_t addr);
 }
@@ -144,14 +145,18 @@ static void gt6_script_unload(void)
 extern "C" uint8_t* vm_base;
 
 enum {
-    GT6_PFS_SLOTS      = 8,
+    /* Eight PFS streams were enough before; the font preload opens about
+     * a dozen host FileObjects (menu_imagefont.bin plus the .vec faces),
+     * so keep headroom for both key spaces. */
+    GT6_PFS_SLOTS      = 16,
     GT6_PFS_PATH_MAX   = 256,
     GT6_PFS_HOST_MAX   = 512,
     GT6_PFS_DEFAULT_MB = 64
 };
 
 struct Gt6PfsSlot {
-    uint32_t       reader;
+    uint32_t       reader;   /* HFileReader key (0x9BB020), 0 for host */
+    uint32_t       file;     /* FileObject key (0x9F8E40), 0 for reader */
     uint32_t       size;
     uint32_t       pos;
     uint64_t       stamp;
@@ -427,9 +432,22 @@ static Gt6PfsSlot* gt6_pfs_find(uint32_t reader)
     return NULL;
 }
 
-static Gt6PfsSlot* gt6_pfs_slot_for(uint32_t reader)
+/* Host opens are keyed by the FileObject pointer (r4 at 0x9F8E40, also
+ * the success return value).  The read helpers find it at
+ * FileStream+0x44; HFileReader::read (0x9BB020) uses reader+0x74, which
+ * is the same word because its FileStream lives at reader+0x30. */
+static Gt6PfsSlot* gt6_pfs_find_file(uint32_t file)
 {
-    Gt6PfsSlot* s = gt6_pfs_find(reader);
+    if (!file) return NULL;
+    for (int i = 0; i < GT6_PFS_SLOTS; i++)
+        if (g_pfs_slots[i].data && g_pfs_slots[i].file == file)
+            return &g_pfs_slots[i];
+    return NULL;
+}
+
+static Gt6PfsSlot* gt6_pfs_slot_for(uint32_t reader, uint32_t file)
+{
+    Gt6PfsSlot* s = reader ? gt6_pfs_find(reader) : gt6_pfs_find_file(file);
     if (s) return s;
 
     for (int i = 0; i < GT6_PFS_SLOTS; i++)
@@ -441,6 +459,60 @@ static Gt6PfsSlot* gt6_pfs_slot_for(uint32_t reader)
         if (g_pfs_slots[i].stamp < lru->stamp) lru = &g_pfs_slots[i];
     gt6_pfs_slot_clear(lru);
     return lru;
+}
+
+/* Read one extracted file into a slot.  The caller has already cleared
+ * any stale stream for the key.  Shared by the HFileReader path hint and
+ * the 0x9F8E40 host-open key so both obey the same path/TOC rules. */
+static int gt6_pfs_install(const char* rel, uint32_t reader, uint32_t file)
+{
+    char host[GT6_PFS_HOST_MAX];
+    char resolved[GT6_PFS_PATH_MAX];
+    if (!gt6_pfs_resolve(rel, host, sizeof host, resolved, sizeof resolved)) {
+        if (gt6_pfs_trace())
+            fprintf(stderr, "[GT6] pfs override: no extracted file for '%s'\n", rel);
+        return 0;
+    }
+
+    FILE* f = fopen(host, "rb");
+    if (!f) return 0;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
+    long n = ftell(f);
+    if (n <= 0 || (uint64_t)n > (uint64_t)gt6_pfs_max_bytes()) {
+        fclose(f);
+        if (gt6_pfs_trace())
+            fprintf(stderr, "[GT6] pfs override: skipping '%s' (%ld bytes, cap %zu)\n",
+                    resolved, n, gt6_pfs_max_bytes());
+        return 0;
+    }
+    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
+
+    unsigned char* buf = (unsigned char*)malloc((size_t)n);
+    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
+        free(buf);
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+
+    Gt6PfsSlot* s = gt6_pfs_slot_for(reader, file);
+    s->reader = reader;
+    s->file   = file;
+    s->size   = (uint32_t)n;
+    s->pos    = 0;
+    s->stamp  = ++g_pfs_stamp;
+    s->data   = buf;
+    snprintf(s->path, sizeof s->path, "%s", resolved);
+
+    if (gt6_pfs_trace()) gt6_pfs_trace_toc(resolved);
+
+    if (reader)
+        fprintf(stderr, "[GT6] pfs override: serving plaintext %s (%ld bytes, reader=0x%08X)\n",
+                resolved, n, (unsigned)reader);
+    else
+        fprintf(stderr, "[GT6] pfs override: serving plaintext %s (%ld bytes, file=0x%08X, host open)\n",
+                resolved, n, (unsigned)file);
+    return 1;
 }
 
 static void gt6_pfs_unload_reader(uint32_t reader)
@@ -470,54 +542,21 @@ static void gt6_pfs_path_hint(uint32_t reader_ea, const char* path)
     /* The boot-script override owns scripts/gt6/main.adc. */
     if (gt6_script_path_matches(rel)) return;
 
-    char host[GT6_PFS_HOST_MAX];
-    char resolved[GT6_PFS_PATH_MAX];
-    if (!gt6_pfs_resolve(rel, host, sizeof host, resolved, sizeof resolved)) {
-        if (gt6_pfs_trace())
-            fprintf(stderr, "[GT6] pfs override: no extracted file for '%s'\n", rel);
-        return;
-    }
-
-    FILE* f = fopen(host, "rb");
-    if (!f) return;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return; }
-    long n = ftell(f);
-    if (n <= 0 || (uint64_t)n > (uint64_t)gt6_pfs_max_bytes()) {
-        fclose(f);
-        if (gt6_pfs_trace())
-            fprintf(stderr, "[GT6] pfs override: skipping '%s' (%ld bytes, cap %zu)\n",
-                    resolved, n, gt6_pfs_max_bytes());
-        return;
-    }
-    if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return; }
-
-    unsigned char* buf = (unsigned char*)malloc((size_t)n);
-    if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
-        free(buf);
-        fclose(f);
-        return;
-    }
-    fclose(f);
-
-    Gt6PfsSlot* s = gt6_pfs_slot_for(reader_ea);
-    s->reader = reader_ea;
-    s->size   = (uint32_t)n;
-    s->pos    = 0;
-    s->stamp  = ++g_pfs_stamp;
-    s->data   = buf;
-    snprintf(s->path, sizeof s->path, "%s", resolved);
-
-    if (gt6_pfs_trace()) gt6_pfs_trace_toc(resolved);
-
-    fprintf(stderr, "[GT6] pfs override: serving plaintext %s (%ld bytes, reader=0x%08X)\n",
-            resolved, n, (unsigned)reader_ea);
+    gt6_pfs_install(rel, reader_ea, 0);
 }
 
 /* Called at the top of HFileReader::read (0x9BB020). */
 static int gt6_pfs_read_override(ppu_context* ctx)
 {
     if (gt6_pfs_disabled()) return 0;
-    Gt6PfsSlot* s = gt6_pfs_find((uint32_t)ctx->gpr[3]);
+    const uint32_t reader = (uint32_t)ctx->gpr[3];
+    Gt6PfsSlot* s = gt6_pfs_find(reader);
+    if (!s) {
+        /* HFileReader keeps its FileStream at reader+0x30, and the
+         * FileObject pointer at FileStream+0x44 (= reader+0x74). */
+        const uint32_t file = reader ? vm_read32((uint64_t)reader + 0x74u) : 0;
+        s = gt6_pfs_find_file(file);
+    }
     if (!s || !s->data) return 0;
 
     uint32_t out = (uint32_t)ctx->gpr[4];
@@ -525,13 +564,14 @@ static int gt6_pfs_read_override(ppu_context* ctx)
     s->stamp = ++g_pfs_stamp;
 
     if (gt6_pfs_trace())
-        fprintf(stderr, "[pfsov] this=0x%08X n=%u pos=%u/%u %s\n",
-                (unsigned)s->reader, (unsigned)n, s->pos, s->size, s->path);
+        fprintf(stderr, "[pfsov] this=0x%08X file=0x%08X n=%u pos=%u/%u %s\n",
+                (unsigned)reader, (unsigned)s->file, (unsigned)n,
+                s->pos, s->size, s->path);
 
     if (n == 0) { ctx->gpr[3] = 0; return 1; }
     if (out == 0) return 0;   /* never write through a null guest buffer */
     if (s->pos >= s->size) {
-        vm_write32((uint64_t)s->reader + 0x18, 1);   /* HFileReader EOF state */
+        vm_write32((uint64_t)reader + 0x18, 1);   /* HFileReader EOF state */
         ctx->gpr[3] = 0;
         return 1;
     }
@@ -549,11 +589,11 @@ static int gt6_pfs_read_override(ppu_context* ctx)
 
     /* Keep HFileReader's guest-visible offset and empty read-ahead buffer
      * coherent (same fields the boot-script override maintains). */
-    vm_write32((uint64_t)s->reader + 0x1B4, s->pos);
-    vm_write32((uint64_t)s->reader + 0x1AC, 0);
-    vm_write32((uint64_t)s->reader + 0x1B0, 0);
+    vm_write32((uint64_t)reader + 0x1B4, s->pos);
+    vm_write32((uint64_t)reader + 0x1AC, 0);
+    vm_write32((uint64_t)reader + 0x1B0, 0);
     if (s->pos >= s->size)
-        vm_write32((uint64_t)s->reader + 0x18, 1);   /* HFileReader EOF state */
+        vm_write32((uint64_t)reader + 0x18, 1);   /* HFileReader EOF state */
 
     ctx->gpr[3] = k;
     return 1;
@@ -563,7 +603,12 @@ static int gt6_pfs_read_override(ppu_context* ctx)
 static int gt6_pfs_seek_override(ppu_context* ctx)
 {
     if (gt6_pfs_disabled()) return 0;
-    Gt6PfsSlot* s = gt6_pfs_find((uint32_t)ctx->gpr[3]);
+    const uint32_t reader = (uint32_t)ctx->gpr[3];
+    Gt6PfsSlot* s = gt6_pfs_find(reader);
+    if (!s) {
+        const uint32_t file = reader ? vm_read32((uint64_t)reader + 0x74u) : 0;
+        s = gt6_pfs_find_file(file);
+    }
     if (!s || !s->data) return 0;
 
     int32_t off = (int32_t)ctx->gpr[4];
@@ -571,13 +616,13 @@ static int gt6_pfs_seek_override(ppu_context* ctx)
     s->pos = (uint32_t)off;
     s->stamp = ++g_pfs_stamp;
 
-    vm_write32((uint64_t)s->reader + 0x1B4, s->pos);
-    vm_write32((uint64_t)s->reader + 0x1AC, 0);
-    vm_write32((uint64_t)s->reader + 0x1B0, 0);
+    vm_write32((uint64_t)reader + 0x1B4, s->pos);
+    vm_write32((uint64_t)reader + 0x1AC, 0);
+    vm_write32((uint64_t)reader + 0x1B0, 0);
 
     if (gt6_pfs_trace())
-        fprintf(stderr, "[pfsseek] this=0x%08X -> %u/%u\n",
-                (unsigned)s->reader, s->pos, s->size);
+        fprintf(stderr, "[pfsseek] this=0x%08X file=0x%08X -> %u/%u\n",
+                (unsigned)reader, (unsigned)s->file, s->pos, s->size);
 
     ctx->gpr[3] = 0;
     return 1;
@@ -610,6 +655,163 @@ static int gt6_path_looks_valid(const char* s)
         if (c == '/') slash = 1;
     }
     return slash;
+}
+
+
+/* -------------------------------------------------------------------------
+ * Host FileObject override (the /font/... path).
+ *
+ * 0x9F8E40 is `open(path, FileObject*, mode)`: r3 is the guest path string,
+ * r4 is the FileObject the device fills in, and the success return is r4.
+ * The boot UI reaches it through 0x9F79A8 -> 0x9F73E8 -> 0x9F719C ->
+ * 0x9F6BF4; HFileReader reaches it through 0x9F4130 -> 0x9F6BF4.
+ *
+ * Device reads go through the FileStream helpers, not HFileReader::read:
+ *   0x9F4AA0(stream, req)  req = { u32 buf; u32 len; }
+ *   0x9F49D8(stream, origin, offset)
+ *   0x9F4930(stream) -> position
+ * and every one of them resolves the FileObject at [stream+0x44].  The host
+ * device services 0x9F4AA0 asynchronously (0xA08ED0 submits to the worker at
+ * 0xA09288 and waits at 0xA21D50), which is where the menu font preload
+ * stalls.  The slot installed below is keyed by the FileObject pointer and
+ * served synchronously from work/gt6_vol.  It is independent of the PFS
+ * key/TOC slots (keyed by the HFileReader) and of the boot-script override.
+ * ---------------------------------------------------------------------- */
+extern "C" void gt6_pfs_host_open_prepare(uint32_t path_ea, uint32_t file_ea)
+{
+    if (gt6_pfs_disabled() || !file_ea) return;
+
+    /* A re-used FileObject must never inherit the previous file's bytes. */
+    Gt6PfsSlot* old = gt6_pfs_find_file(file_ea);
+    if (old) gt6_pfs_slot_clear(old);
+
+    char path[GT6_PFS_PATH_MAX];
+    if (!gt6_read_guest_cstr(path_ea, path, sizeof path)) return;
+
+    char rel[GT6_PFS_PATH_MAX];
+    if (!gt6_pfs_relpath(path, rel, sizeof rel)) return;
+
+    /* The boot-script override owns scripts/gt6/main.adc. */
+    if (gt6_script_path_matches(rel)) return;
+
+    if (gt6_pfs_trace())
+        fprintf(stderr, "[hostopen] file=0x%08X path='%s'\n",
+                (unsigned)file_ea, rel);
+
+    gt6_pfs_install(rel, 0, file_ea);
+}
+
+/* Called by the wrapper after 0x9F8E40 returns.  The measured device opens
+ * return the same FileObject that was passed in r4; re-key defensively if a
+ * device ever allocates/returns a different pointer, and drop the slot when
+ * the open failed. */
+extern "C" void gt6_pfs_host_open_commit(uint32_t file_ea, uint32_t ret_ea)
+{
+    Gt6PfsSlot* s = gt6_pfs_find_file(file_ea);
+    if (!s) return;
+
+    uint32_t file = file_ea;
+    if (ret_ea != file_ea) {
+        if (ret_ea < 0x00010000u || ret_ea >= 0xFFFFFFF0u) {
+            gt6_pfs_slot_clear(s);
+            return;
+        }
+        s->file = ret_ea;
+        file = ret_ea;
+    }
+
+    /* The device open runs inside 0x9F8E40 and may leave FileObject+0xC0 at
+     * zero for a host file.  HFileReader::read uses that word as the size. */
+    vm_write64((uint64_t)file + 0xC0u, (uint64_t)s->size);
+}
+
+/* Called at the top of 0x9F4AA0.  r4 points at the {buf,len} request the
+ * device read would consume. */
+extern "C" int gt6_pfs_stream_read_override(ppu_context* ctx)
+{
+    if (gt6_pfs_disabled()) return 0;
+    const uint32_t stream = (uint32_t)ctx->gpr[3];
+    const uint32_t req    = (uint32_t)ctx->gpr[4];
+    if (!stream || !req) return 0;
+
+    const uint32_t file = vm_read32((uint64_t)stream + 0x44u);
+    Gt6PfsSlot* s = gt6_pfs_find_file(file);
+    if (!s || !s->data) return 0;
+
+    const uint32_t out = vm_read32((uint64_t)req + 0u);
+    uint32_t n         = vm_read32((uint64_t)req + 4u);
+    s->stamp = ++g_pfs_stamp;
+
+    if (gt6_pfs_trace())
+        fprintf(stderr, "[hostov] stream=0x%08X file=0x%08X n=%u pos=%u/%u %s\n",
+                (unsigned)stream, (unsigned)file, (unsigned)n,
+                s->pos, s->size, s->path);
+
+    if (out == 0) return 0;   /* never write through a null guest buffer */
+    if (n == 0 || s->pos >= s->size) {
+        ctx->gpr[3] = 0;
+        return 1;
+    }
+
+    uint32_t k = n;
+    if (k > s->size - s->pos) k = s->size - s->pos;
+    if (vm_base) {
+        memcpy(vm_base + out, s->data + s->pos, k);
+    } else {
+        for (uint32_t i = 0; i < k; i++)
+            vm_write8((uint64_t)out + i, s->data[s->pos + i]);
+    }
+    s->pos += k;
+    ctx->gpr[3] = k;
+    return 1;
+}
+
+/* Called at the top of 0x9F49D8(stream, origin, offset). */
+extern "C" int gt6_pfs_stream_seek_override(ppu_context* ctx)
+{
+    if (gt6_pfs_disabled()) return 0;
+    const uint32_t stream = (uint32_t)ctx->gpr[3];
+    if (!stream) return 0;
+
+    Gt6PfsSlot* s = gt6_pfs_find_file(vm_read32((uint64_t)stream + 0x44u));
+    if (!s || !s->data) return 0;
+
+    const int32_t origin = (int32_t)ctx->gpr[4];
+    const int32_t off    = (int32_t)ctx->gpr[5];
+    int64_t base = 0;
+    if (origin == 1) base = (int64_t)s->pos;
+    else if (origin == 2) base = (int64_t)s->size;
+    int64_t target = base + off;
+    if (target < 0) target = 0;
+    if (target > (int64_t)s->size) target = (int64_t)s->size;
+    s->pos = (uint32_t)target;
+    s->stamp = ++g_pfs_stamp;
+
+    if (gt6_pfs_trace())
+        fprintf(stderr, "[hostseek] stream=0x%08X origin=%d off=%d -> %u/%u\n",
+                (unsigned)stream, (int)origin, (int)off, s->pos, s->size);
+
+    ctx->gpr[3] = 0;
+    return 1;
+}
+
+/* Called at the top of 0x9F4930(stream) -> position. */
+extern "C" int gt6_pfs_stream_tell_override(ppu_context* ctx)
+{
+    if (gt6_pfs_disabled()) return 0;
+    const uint32_t stream = (uint32_t)ctx->gpr[3];
+    if (!stream) return 0;
+
+    Gt6PfsSlot* s = gt6_pfs_find_file(vm_read32((uint64_t)stream + 0x44u));
+    if (!s || !s->data) return 0;
+    s->stamp = ++g_pfs_stamp;
+
+    if (gt6_pfs_trace())
+        fprintf(stderr, "[hosttell] stream=0x%08X -> %u/%u\n",
+                (unsigned)stream, s->pos, s->size);
+
+    ctx->gpr[3] = s->pos;
+    return 1;
 }
 
 extern "C" void gt6_script_path_hint(uint32_t reader_ea, uint32_t str_ea)
