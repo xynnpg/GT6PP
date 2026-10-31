@@ -96,6 +96,21 @@ Console = log. Separate window = game framebuffer.
 
 ---
 
+## Contributors
+
+**Project owner**
+
+- **XYMPG ([@xynnpg](https://github.com/xynnpg))** — project owner, direction, requirements, hardware & disc access, RPCS3 oracle runs, visual acceptance, and release decisions.
+
+**How to join**
+
+Anyone who contributes code, analysis, testing, hardware, or documentation is welcome.  
+Open a pull request that adds yourself to [CONTRIBUTORS.md](CONTRIBUTORS.md) with a short description of what you did.
+
+See the full list and contribution guidelines in [CONTRIBUTORS.md](CONTRIBUTORS.md).
+
+---
+
 ## How you can help
 
 This is still early. The most valuable contributions right now:
@@ -107,8 +122,6 @@ This is still early. The most valuable contributions right now:
 
 Open an issue, submit a PR, or just star the repo so more people see the work.
 
-See [CONTRIBUTORS.md](CONTRIBUTORS.md).
-
 ---
 
 ## Legal
@@ -117,7 +130,8 @@ See [CONTRIBUTORS.md](CONTRIBUTORS.md).
 - No game data, decryption keys, decrypted executables, or generated recompiled game binaries are included or distributed.
 - You must legally own Gran Turismo 6 to use this project.
 - Gran Turismo and all related trademarks belong to their respective owners.
-- Original project code is MIT-licensed (see [LICENSE](LICENSE)). Third-party components retain their own licenses.
+- Original project code is released under the **MIT License** — see [LICENSE](LICENSE).
+- The LICENSE also contains an explicit disclaimer that no game data is licensed or distributed by this repository.
 
 ---
 
