@@ -928,6 +928,155 @@ static void gt6_cellUsbdSetThreadPriority2(ppu_context* ctx)
     ctx->gpr[3] = 0;   /* CELL_OK */
 }
 
+/* -------------------------------------------------------------------------
+ * Boot/presents probes: the pending project handoff.
+ *
+ * `main.adc` TOP -> `bootstrap_phase1_module.execBoot` -> `initMenuSystem`
+ * -> `MGOM.initialize()` (script code 0x1CA61).  The native method wrapper at
+ * 0x6C5424 calls `0x5F093C`, which allocates the menu context and starts the
+ * menu worker thread (`0x6CD8F8` -> `0xA11F20` -> `sys_ppu_thread_create`,
+ * entry OPD 0x14E0088 -> code 0xA122D4 -> 0xA12170).
+ *
+ * Measured in `work/size_run.err`, thread 35 (`vyENO`, arg=0x7FFECB00) is
+ * created at line 263193 and stays alive until the shutdown join at line
+ * 289338.  It is **not** the keep-alive/exit gate: the engine's 0xA11F20 wrote
+ * arg+0x94 = 1 before create.  The worker's queue words at arg+0x80..0x88 are
+ * the interesting part.
+ *
+ * `MGOM.start("boot")` (0x6C54DC -> 0x6C5478 -> 0x568C94) only stores the
+ * pending project name at `manager+0x50` and sets `manager+0x48 = 1`.  It does
+ * not open a file.  The missing event is whichever engine update consumes that
+ * pending flag and calls the project loader (0x5FA338 -> 0x5F0424).  These
+ * probes are read-only and identify that handoff; they never synthesize an
+ * asset or call the presents functions.
+ * ---------------------------------------------------------------------- */
+static int gt6_boot_trace(void)
+{
+    static int on = -1;
+    if (on < 0) {
+        const char* e = getenv("GT6_BOOT_TRACE");
+        on = (e && *e && *e != '0') ? 1 : 0;
+    }
+    return on;
+}
+
+static int gt6_guest_ptr_ok(uint32_t ea)
+{
+    /* Guest stacks can live below 0x80000000 (0x7FFE....) or in the
+     * 0xCFE00000 main-stack window, so do not use a 2 GB cutoff here. */
+    return ea >= 0x00010000u && ea < 0xFFFFFFF0u;
+}
+
+extern "C" void gt6_menu_worker_entry(ppu_context* ctx)
+{
+    const uint32_t arg = (uint32_t)ctx->gpr[3];
+    if (!gt6_guest_ptr_ok(arg))
+        return;
+    if (!gt6_boot_trace())
+        return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+
+    const uint8_t keep = vm_read8((uint64_t)arg + 0x94u);
+    fprintf(stderr,
+            "[GT6] menu worker entry arg=0x%08X keep=%u "
+            "q0=0x%08X q1=0x%08X q2=0x%08X\n",
+            arg, (unsigned)keep,
+            vm_read32((uint64_t)arg + 0x80u),
+            vm_read32((uint64_t)arg + 0x84u),
+            vm_read32((uint64_t)arg + 0x88u));
+}
+
+/* `0xA11F20` is the thread-create helper.  It sets the keep-alive byte on
+ * `[*param_1+0x94]` before creating the worker.  Probe both pointers so a
+ * mismatch between the object it writes and the thread arg is visible. */
+extern "C" void gt6_menu_worker_prepare(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    const uint32_t holder = (uint32_t)ctx->gpr[3];
+    uint32_t obj = 0;
+    unsigned flag = 0;
+    if (gt6_guest_ptr_ok(holder)) {
+        obj = vm_read32(holder);
+        if (gt6_guest_ptr_ok(obj))
+            flag = (unsigned)vm_read8((uint64_t)obj + 0x94u);
+    }
+    fprintf(stderr,
+            "[GT6] menu worker prepare holder=0x%08X obj=0x%08X flag=%u\n",
+            holder, obj, flag);
+}
+
+/* `MGOM.start(name)` wrapper (0x6C54DC -> 0x6C5478 -> 0x568C94).  This is
+ * the script-side request that must be consumed by the menu worker above.
+ * The wrapper's r4 is the HValue/string argument; try both the object's data
+ * word and the raw pointer. */
+extern "C" void gt6_mgom_start_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 64) return;
+    }
+    const uint32_t name = (uint32_t)ctx->gpr[4];
+    char s[96]; s[0] = 0;
+    if (gt6_guest_ptr_ok(name)) {
+        uint32_t data = vm_read32(name);
+        if (!gt6_guest_ptr_ok(data) ||
+            !gt6_read_guest_cstr(data, s, sizeof s))
+            gt6_read_guest_cstr(name, s, sizeof s);
+    }
+    fprintf(stderr, "[GT6] MGOM.start name=0x%08X '%s'\n", name, s);
+}
+
+/* `MGOM.setProjectRoot(root)` wrapper (0x6C4DC0 -> 0x6C4A00 -> 0x5F0D64). */
+extern "C" void gt6_mgom_setroot_probe(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 8) return;
+    }
+    const uint32_t root = (uint32_t)ctx->gpr[4];
+    char s[96]; s[0] = 0;
+    if (gt6_guest_ptr_ok(root)) {
+        uint32_t data = vm_read32(root);
+        if (!gt6_guest_ptr_ok(data) ||
+            !gt6_read_guest_cstr(data, s, sizeof s))
+            gt6_read_guest_cstr(root, s, sizeof s);
+    }
+    fprintf(stderr, "[GT6] MGOM.setProjectRoot arg=0x%08X '%s'\n", root, s);
+}
+
+/* Pending-project setter `0x568C94`: the context stores the name at +0x50 and
+ * raises the pending flag at +0x48.  It does not open any file itself. */
+extern "C" void gt6_menu_project_request(ppu_context* ctx)
+{
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 64) return;
+    }
+    const uint32_t obj  = (uint32_t)ctx->gpr[3];
+    const uint32_t name = (uint32_t)ctx->gpr[4];
+    /* r4 is an HValue, not necessarily a C string; the `MGOM.start` probe
+     * above already prints the raw 'boot' argument.  Log the two object words
+     * only, so this cannot read a vtable as text. */
+    fprintf(stderr,
+            "[GT6] menu project request obj=0x%08X name=0x%08X "
+            "word0=0x%08X word1=0x%08X pending_before=%u "
+            "(0x568C94 sets +0x48=1 next)\n",
+            obj, name,
+            gt6_guest_ptr_ok(name) ? vm_read32((uint64_t)name) : 0u,
+            gt6_guest_ptr_ok(name) ? vm_read32((uint64_t)name + 4u) : 0u,
+            gt6_guest_ptr_ok(obj) ? (unsigned)vm_read32((uint64_t)obj + 0x48u) : 0u);
+}
+
 extern "C" void gt6_hle_overrides(void)
 {
     ps3_hle_register_ctx(0xC765B995u, "cellSpursGetWorkloadFlag",

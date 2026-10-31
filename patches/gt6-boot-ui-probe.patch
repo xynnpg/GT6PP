@@ -1,0 +1,62 @@
+--- a/gt6/generated/ppu_recomp_015.cpp
++++ b/gt6/generated/ppu_recomp_015.cpp
+@@ -40626,8 +40626,10 @@
+ }
+ 
+ void func_006C4A5C(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[bootui] mgom_ctor out=0x%08X\n",
++                (unsigned)ctx->gpr[3]);
+         ctx->gpr[4] = (int64_t)(int32_t)(4);
+         ctx->gpr[0] = ctx->lr;
+         ctx->lr = 0x006C4A68; func_00BE1414(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[25] = ctx->gpr[3] | ctx->gpr[3];
+@@ -40963,8 +40965,10 @@
+ }
+ 
+ void func_006C4EC0(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[bootui] class_register_impl this=0x%08X\n",
++                (unsigned)ctx->gpr[3]);
+         ctx->gpr[4] = (int64_t)(int32_t)((uint32_t)0x106 << 16);
+         ctx->gpr[0] = ctx->lr;
+         ctx->gpr[11] = ctx->gpr[3] | ctx->gpr[3];
+         ctx->lr = 0x006C4ED0; func_00BE1420(ctx); DRAIN_TRAMPOLINE(ctx);
+@@ -41077,8 +41081,10 @@
+ }
+ 
+ void func_006C5064(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[bootui] class_registrar r3=0x%08X\n",
++                (unsigned)ctx->gpr[3]);
+         ctx->gpr[0] = ctx->lr;
+         ctx->lr = 0x006C506C; func_00BE1424(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[30] = (int64_t)(int32_t)((uint32_t)0x15A << 16);
+         vm_write64(ctx->gpr[1] + -0x90, ctx->gpr[1]); ctx->gpr[1] += -0x90;
+@@ -41522,8 +41528,10 @@
+ }
+ 
+ void func_006C55DC(ppu_context* ctx) {
+     PPU_MM_SNAP
++        fprintf(stderr, "[bootui] mgom_factory this=0x%08X\n",
++                (unsigned)ctx->gpr[3]);
+         ctx->gpr[0] = ctx->lr;
+         ctx->lr = 0x006C55E4; func_00BE1428(ctx); DRAIN_TRAMPOLINE(ctx);
+         vm_write64(ctx->gpr[1] + -0x90, ctx->gpr[1]); ctx->gpr[1] += -0x90;
+         ctx->gpr[30] = ctx->gpr[1] + (int64_t)(0x70);
+--- a/gt6/generated/ppu_recomp_022.cpp
++++ b/gt6/generated/ppu_recomp_022.cpp
+@@ -115925,8 +115925,13 @@
+ }
+ 
+ void func_009E2914(ppu_context* ctx) {
+     PPU_MM_SNAP
++        { uint32_t _t = (uint32_t)ctx->gpr[3];
++          uint32_t _b = (_t >= 0x10000u) ? vm_read32((uint64_t)_t + 0x50u) : 0u;
++          uint32_t _e = (_t >= 0x10000u) ? vm_read32((uint64_t)_t + 0x54u) : 0u;
++          fprintf(stderr, "[bootui] vector_clear this=0x%08X begin=0x%08X end=0x%08X count=%u\n",
++                  _t, _b, _e, (_e >= _b) ? (_e - _b) / 4u : 0u); }
+         ctx->gpr[0] = ctx->lr;
+         ctx->lr = 0x009E291C; func_00BE1428(ctx); DRAIN_TRAMPOLINE(ctx);
+         ctx->gpr[30] = ctx->gpr[3] + (int64_t)(0x4C);
+         vm_write64(ctx->gpr[1] + -0x80, ctx->gpr[1]); ctx->gpr[1] += -0x80;

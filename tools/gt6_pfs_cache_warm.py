@@ -156,13 +156,16 @@ def main(argv: list[str]) -> int:
 
     if args.check or not args.write:
         failed = False
-        # The guest renames <key>.fdupi to <key> once every block is present.
-        # Accept either state; the bytes and length are the contract.
+        # The guest stats/opens the bare <key> first; only if that fails does
+        # it fall back to the PDIPFS_bdmark marker and the <key>.fdupm/.fdupi
+        # cache pair (RPCS3 oracle: rpcs3_input.log 0:00:27.225 bare W2 open,
+        # 0:00:28.475 bdmark fallback for missing K/96).  A completed bare file
+        # is therefore authoritative even when a stale pair still exists.
         completed_path = cache_dir / args.key
-        actual_data_path = data_path
-        if not data_path.exists() and completed_path.exists():
-            actual_data_path = completed_path
-            print(f"completed   {actual_data_path} (renamed from .fdupi)")
+        actual_data_path = completed_path if completed_path.exists() else data_path
+        completed_state = actual_data_path == completed_path
+        if completed_state:
+            print(f"completed   {actual_data_path} (bare cache file; guest opens this first)")
         if not actual_data_path.exists():
             print(f"MISSING     {data_path} (and no completed {completed_path})")
             failed = True
@@ -179,36 +182,48 @@ def main(argv: list[str]) -> int:
                 print("PASS        data is byte-identical to the GT.VOL slice")
 
         if not map_path.exists():
-            print(f"MISSING     {map_path}")
-            failed = True
+            if completed_state:
+                print(f"WARN        {map_path} is absent; not used for a "
+                      "completed bare cache file")
+            else:
+                print(f"MISSING     {map_path}")
+                failed = True
         else:
             raw = map_path.read_bytes()
             print(f"map         {map_path} ({len(raw)} bytes)")
+            map_ok = True
+            label = "WARN" if completed_state else "FAIL"
             try:
                 zsize, ident, got_blocks, bitmap = parse_map(raw)
             except ValueError as exc:
-                print(f"FAIL        {exc}")
-                failed = True
+                print(f"{label}        {exc}")
+                map_ok = False
             else:
                 if zsize != entry["zsize"]:
-                    print(f"FAIL        map ZSize 0x{zsize:X}, want 0x{entry['zsize']:X}")
-                    failed = True
+                    print(f"{label}        map ZSize 0x{zsize:X}, "
+                          f"want 0x{entry['zsize']:X}")
+                    map_ok = False
                 if ident != 0:
-                    print(f"FAIL        map id {ident}, want 0")
-                    failed = True
+                    print(f"{label}        map id {ident}, want 0")
+                    map_ok = False
                 if got_blocks != blocks:
-                    print(f"FAIL        map blocks {got_blocks}, want {blocks}")
-                    failed = True
+                    print(f"{label}        map blocks {got_blocks}, want {blocks}")
+                    map_ok = False
                 if bitmap[:BITMAP_SIZE] != expected_bitmap(blocks):
-                    print("FAIL        bitmap does not cover exactly the raw blocks")
-                    failed = True
+                    print(f"{label}        bitmap does not cover exactly the raw blocks")
+                    map_ok = False
                 if len(raw) < HEADER_SIZE + BITMAP_SIZE:
-                    print(f"FAIL        map is {len(raw)} bytes, want at least "
+                    print(f"{label}        map is {len(raw)} bytes, want at least "
                           f"{HEADER_SIZE + BITMAP_SIZE}")
-                    failed = True
-                if not failed:
-                    print(f"PASS        map covers {blocks} blocks "
-                          f"(ZSize 0x{zsize:X}, id 0)")
+                    map_ok = False
+            if map_ok:
+                print(f"PASS        map covers {blocks} blocks "
+                      f"(ZSize 0x{zsize:X}, id 0)")
+            elif completed_state:
+                print("WARN        stale/incomplete .fdupm ignored: the guest "
+                      "opens the completed bare file and never reads this map")
+            else:
+                failed = True
 
         # The logical file is a read-side result, not a cache file.  Reporting
         # it prevents the common mistake of comparing .fdupi with the extracted

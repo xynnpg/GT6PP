@@ -65,6 +65,8 @@ Run 300 s with `GT6_PFS_TRACE=1` and check for:
   `python tools/gt6_frame_check.py`.
 
 If the guest instead takes the bdmark cache route (`stat K/<key>.fdupm`,
-`open K/<key>.fdupi`), the bare file is not enough: the mount/device fix in
-`docs/analysis/pfs-mount-device-fix.md` must land first. The two changes are
-complementary, not alternatives.
+`open K/<key>.fdupi`), the bare file is not visible at the guest path. The
+oracle (`rpcs3_input.log:64326-64337`) proves a bare `PDIPFS/K/<key>` file is
+opened directly and the marker directory is only the fallback for missing keys
+(`K/96` at `0:00:28.475`). See `docs/analysis/pfs-mount-device-fix.md`; no
+mount/device code change is required, and `PDIPFS_bdmark` must be kept.

@@ -48,6 +48,17 @@ FILEDEV_INIT_FUNC = "func_00A08A00"
 FILEDEV_INIT_REQUIRED = (
     "vm_write32(ctx->gpr[29] + 0x1C2C, 0);",
 )
+# func_009F4130 is deliberately not rewritten.  W2 is fixed by seeding the
+# bare PDIPFS/K/W2 cache file; see docs/analysis/pfs-mount-device-fix.md.
+
+# Boot/presents probes (docs/analysis/boot-presents-fix.md): the project
+# request queued by MGOM.start("boot") is not consumed before MainLoop.
+# tools/apply_gt6_post_lift.py installs the read-only worker/project probes.
+# Fail the relift if they are lost.
+BOOT_WORKER_FUNC = "func_00A122D4"
+BOOT_WORKER_REQUIRED = ("gt6_menu_worker_entry(ctx);",)
+BOOT_PREPARE_FUNC = "func_00A11F20"
+BOOT_PREPARE_REQUIRED = ("gt6_menu_worker_prepare(ctx);",)
 
 
 def find_function(text: str, name: str) -> str | None:
@@ -116,6 +127,25 @@ def main(argv: list[str]) -> int:
                       "run tools/apply_gt6_post_lift.py", file=sys.stderr)
                 return 1
             print(f"{path.name}: {fname} FileDeviceHost guard OK")
+        if n != 1:
+            print(f"expected exactly one {fname}, found {n}", file=sys.stderr)
+            return 1
+
+    # Boot/presents menu-worker hook (docs/analysis/boot-presents-fix.md).
+    for fname, required in ((BOOT_WORKER_FUNC, BOOT_WORKER_REQUIRED),
+                            (BOOT_PREPARE_FUNC, BOOT_PREPARE_REQUIRED)):
+        n = 0
+        for path in sorted(root.glob("ppu_recomp_*.cpp")):
+            body = find_function(path.read_text(encoding="latin-1"), fname)
+            if body is None:
+                continue
+            n += 1
+            missing = [m for m in required if m not in body]
+            if missing:
+                print(f"{path.name}: {fname} boot/presents hook missing {missing}; "
+                      "run tools/apply_gt6_post_lift.py", file=sys.stderr)
+                return 1
+            print(f"{path.name}: {fname} boot/presents hook OK")
         if n != 1:
             print(f"expected exactly one {fname}, found {n}", file=sys.stderr)
             return 1

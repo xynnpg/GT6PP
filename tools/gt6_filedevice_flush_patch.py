@@ -33,6 +33,14 @@ The patch is applied to the generated C after a relift.  It is idempotent and
 does not change an active-read path: when +0x1C29 is 1 the behaviour is
 byte-for-byte the original.
 
+History: an earlier revision also rewrote ``func_009F4130`` to bind a host
+FileObject to a PFS read state.  That was rejected as fabrication (it replaced
+a FileDevice* with a read-state pointer).  The W2 path is fixed at the data
+layer by seeding the bare PDIPFS cache file; see
+docs/analysis/pfs-mount-device-fix.md.  If a generated tree still contains
+the old size-only block or the rejected bind, patch_text() removes it and
+does not add a replacement.
+
 Usage:
     python tools/gt6_filedevice_flush_patch.py --check gt6/generated
     python tools/gt6_filedevice_flush_patch.py gt6/generated
@@ -48,6 +56,7 @@ from pathlib import Path
 
 FLUSH_FUNC = "func_00A08B8C"
 INIT_FUNC = "func_00A08A00"
+OPEN_FUNC = "func_009F4130"
 
 FLUSH_GUARD = (
     "        /* no read in progress: nothing to flush; +0x1C2C may be stale */\n"
@@ -62,6 +71,19 @@ INIT_CLEAR = (
     "/* local FileInternalStreamDefault is destroyed */\n"
 )
 
+# Rejected 0x9F4130 rewrites are removed, not replaced.  The first was a
+# size-only block with a bogus FileObject+0x4C write; the second replaced the
+# FileDevice* at FileObject+0x40 with a PFS read-state pointer.  Both are
+# unsafe and neither fixes the W2 mount choice.  Keep the markers only so an
+# already-patched tree can be cleaned.
+OLD_OPEN_MARKER = (
+    "        /* PFS open left FileObject+0xC0 at zero: use the cache stored_size. */\n"
+)
+OLD_BIND_MARKER = (
+    "        /* Cache-backed host FileObject: bind to the PFS read state. */\n"
+)
+OLD_OPEN_END = "          } }\n"
+
 FUNC_RE = re.compile(r"^void (func_[0-9A-F]{8})\(ppu_context\* ctx\) \{", re.M)
 
 
@@ -72,6 +94,20 @@ def _body(text: str, name: str) -> tuple[int, int] | None:
         return None
     end = text.find("\nvoid ", start + len(key))
     return start, (end if end >= 0 else len(text))
+
+
+def _strip_old_open(body: str) -> str:
+    """Remove the rejected size-only or bind block, if a tree still has one."""
+    for marker in (OLD_OPEN_MARKER, OLD_BIND_MARKER):
+        while True:
+            i = body.find(marker)
+            if i < 0:
+                break
+            j = body.find(OLD_OPEN_END, i)
+            if j < 0:
+                break
+            body = body[:i] + body[j + len(OLD_OPEN_END):]
+    return body
 
 
 def patch_text(text: str) -> tuple[str, int]:
@@ -97,6 +133,15 @@ def patch_text(text: str) -> tuple[str, int]:
                 INIT_ANCHOR, INIT_ANCHOR + INIT_CLEAR, 1) + text[end:]
             changes += 1
 
+    span = _body(text, OPEN_FUNC)
+    if span is not None:
+        start, end = span
+        body = text[start:end]
+        new_body = _strip_old_open(body)
+        if new_body != body:
+            text = text[:start] + new_body + text[end:]
+            changes += 1
+
     return text, changes
 
 
@@ -104,16 +149,16 @@ def verify_text(text: str) -> list[str]:
     errs: list[str] = []
 
     span = _body(text, FLUSH_FUNC)
-    if span is None:
-        errs.append(f"{FLUSH_FUNC} missing")
-    elif FLUSH_GUARD.strip() not in text[span[0]:span[1]]:
+    if span is not None and FLUSH_GUARD.strip() not in text[span[0]:span[1]]:
         errs.append(f"{FLUSH_FUNC} lacks the +0x1C29 active-read guard")
 
     span = _body(text, INIT_FUNC)
-    if span is None:
-        errs.append(f"{INIT_FUNC} missing")
-    elif INIT_CLEAR.strip() not in text[span[0]:span[1]]:
+    if span is not None and INIT_CLEAR.strip() not in text[span[0]:span[1]]:
         errs.append(f"{INIT_FUNC} still leaves +0x1C2C pointing at the dead local")
+
+    # 0x9F4130 is intentionally not rewritten.  A bare PDIPFS/K/<key> file is
+    # the oracle-verified route (docs/analysis/pfs-mount-device-fix.md); no
+    # FileObject size or device bind belongs here.
 
     return errs
 
@@ -121,7 +166,8 @@ def verify_text(text: str) -> list[str]:
 def _targets(root: Path):
     for path in sorted(root.glob("ppu_recomp_*.cpp")):
         s = path.read_text(encoding="latin-1")
-        if f"void {FLUSH_FUNC}(" in s or f"void {INIT_FUNC}(" in s:
+        if (f"void {FLUSH_FUNC}(" in s or f"void {INIT_FUNC}(" in s
+                or f"void {OPEN_FUNC}(" in s):
             yield path, s
 
 
@@ -143,8 +189,12 @@ def main(argv: list[str]) -> int:
     total = 0
     bad = 0
     found = 0
+    seen_funcs: set[str] = set()
     for path, s in _targets(root):
         found += 1
+        for fname in (FLUSH_FUNC, INIT_FUNC, OPEN_FUNC):
+            if f"void {fname}(" in s:
+                seen_funcs.add(fname)
         errs = verify_text(s)
         if check:
             if errs:
@@ -165,8 +215,10 @@ def main(argv: list[str]) -> int:
             for e in errs:
                 print(f"{path.name}: {e}", file=sys.stderr)
 
-    if found == 0:
-        print("no generated file contains func_00A08B8C/func_00A08A00",
+    missing_funcs = [f for f in (FLUSH_FUNC, INIT_FUNC, OPEN_FUNC)
+                     if f not in seen_funcs]
+    if found == 0 or missing_funcs:
+        print(f"generated tree lacks {missing_funcs or 'all target functions'}",
               file=sys.stderr)
         return 2
     if check:

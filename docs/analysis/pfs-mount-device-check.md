@@ -17,7 +17,7 @@ document.
 
 | # | Question | Verdict | Finding |
 |---:|---|---|---|
-| 1 | Host-vs-PFS selection independently identified | **PASS (branch) / OPEN (mount key)** | The PFS open path `0x9FDAAC` branches on `[FileInfo+0x3C]` at `0x009FDAE8`: nonzero selects the cache/bdmark branch (W2), zero selects the direct PFS open (K/IK). The W2 branch checks `<base>/PDIPFS_bdmark/<key>` via `0x9FD9B8`, attaches the cache with `0xA422A0`, and configures it with `0xA3EB60`. W2's `HFileReader` is opened through `0x9F4130` on a **host** `FileObject` (`vt=0x1488218`, `dev=0x7005C000`); K/IK reaches the PFS read `0xA0043C` -> `0xA40FBC` at `off=0x8BBC0`. The exact `0x9F8E40` mount object/match key is **not logged**, so the mount-layer key remains open. |
+| 1 | Host-vs-PFS selection independently identified | **PASS (branch) / OPEN (mount key)** | The PFS open path `0x9FDAAC` branches on `[FileInfo+0x3C]` at `0x009FDAE8`: nonzero selects the cache/bdmark branch (W2), zero selects the direct PFS open (K/IK). The W2 branch checks `<base>/PDIPFS_bdmark/<key>` via `0x9FD9B8`, attaches the cache with `0xA422A0`, and configures it with `0xA3EB60`. W2's `HFileReader` is opened through `0x9F4130` on a **host** `FileObject` (`vt=0x1488218`, `dev=0x7005C000`); K/IK reaches the PFS read `0xA0043C` -> `0xA40FBC` at `off=0x8BBC0`. The path key is the sibling directory component: `0x9FD6C0` builds `.../PDIPFS/...`, `0x9FD9B8` builds `.../PDIPFS_bdmark/...`; a mount keyed at `.../PDIPFS/` does not cover the sibling `.../PDIPFS_bdmark/`. The exact `0x9F8E40` mount object/match key is **not logged**, so the runtime match object remains open. |
 | 2 | The fixer's patch gives W2's HFileReader the PFS FileObject/source state | **FAIL** | The only candidate patch present is `patches/gt6-pfs-source-bind.patch`, the previously rejected `FileObject+0x40` bind. It overwrites the device pointer with a read-state pointer. `FileObject+0x88` is **not** the cache (it is the path buffer written by `0x9F58D8`); the cache lives at `[0xA3DF24(handle)+0x88]`. The patch is inert for W2, or corrupts if it ever fires. |
 | 3 | Boot script and ordinary host files preserved | **FAIL as a proof** | The guard uses `FileObject+0x88` as "cache presence"; that field is path/uninitialized data on a host object, not a cache marker. The boot script probably does not fire only because `FileStream+0x4C` is not a PFS state, not because the guard is correct. Ordinary host files are not proven safe. |
 | 4 | No cache bytes fabricated | **PASS (narrow)** | The patch writes no cache data and does not decrypt or inflate. It does fabricate a device binding and a size field, so this narrow PASS does not make it a fix. |
@@ -106,17 +106,35 @@ object split is observed. The disassembly starts:
   The current probe does not log the real K/IK `FileInfo`, so the zero value
   itself is still to be confirmed by the next trace.
 
-The observable key is the path component:
+The observable key is the directory component:
 
 | Key | Guest path | Observed object |
 |---|---|---|
 | `K/W2` | `/dev_hdd0/game/BCUS98296/USRDIR/PDIPFS_bdmark/K/W2` (zero-length marker) | host `FileObject`, `vt=0x1488218`, `dev=0x7005C000` |
 | `K/IK` | `/dev_hdd0/game/BCUS98296/USRDIR/PDIPFS/K/IK` (572,352-byte bare cache) | PFS `FileObject` -> `0x9F4AA0` -> `0xA0043C` -> `0xA40FBC off=0x8BBC0` |
 
+This is a sibling-directory distinction, not a size distinction:
+
+* `0x9FD6C0` copies `[this+0x16C]` and appends `PDIPFS` (string `0x1097B70`),
+  producing the PFS data path `.../PDIPFS/...`;
+* `0x9FD9B8` copies the same base and appends `PDIPFS_bdmark` (string
+  `0x1097B78`), producing `.../PDIPFS_bdmark/...`.
+
+`PDIPFS_bdmark` is a sibling of `PDIPFS`, not a child. A mount key that covers
+`.../PDIPFS/...` therefore does not cover `.../PDIPFS_bdmark/...`; the
+bdmark path is served by the host/game-data mount, while `.../PDIPFS/K/IK`
+stays on the PFS mount. That is the observed host-vs-PFS split. The runtime
+match object still needs the corrected probe to name it, but the key is the
+`PDIPFS` directory prefix with its separator, not the file size or the
+`FileObject` fields.
+
 `0x9FD9B8` is the bdmark path builder/checker: it appends
-`PDIPFS_bdmark` (string `0x1097B78`) and the key, then tests existence. It is
-the branch that selects the marker object for W2. It is **not** the source
-read; the source read is the `0xA00DA8` path with `[this+0x1F0]`.
+`PDIPFS_bdmark` and the key, then tests existence. It is the branch that
+selects the marker object for W2. It is **not** the source read; the source
+read is the `0xA00DA8` path with `[this+0x1F0]`. The W2 log's `0xFDAAC`
+cache setup is therefore consistent with the source/cache open
+(`.../PDIPFS/K/W2`), separate from the host marker open that returns
+`0xCFEFE398`.
 
 `0xA41B9C` is a red herring for the FileObject selection. It is the return
 address of the `cellFsOpen` call inside `0xA41A90`:
@@ -205,7 +223,8 @@ No mount/device-selection patch or `docs/analysis/pfs-mount-device-fix.md`
 exists at check time (18:05). The only candidate patch is
 `patches/gt6-pfs-source-bind.patch`, and
 `tools/gt6_filedevice_flush_patch.py` implements the same previously rejected
-bind.
+bind. The two `FileDeviceHost` lifetime guards (`+0x1C29`/`+0x1C2C`) are a
+separate, applied fix and are not the W2 read-through fix.
 The core is:
 
 ```c
@@ -263,7 +282,10 @@ Three concrete reasons:
    That object is the PFS source (handle `0x100` in the log), not the host
    `FileObject` `0xCFEFE398`. The patch's `_f+0x88` read is at best
    uninitialized at bind time and is overwritten with path bytes immediately
-   afterwards; it is not a cache-presence test.
+   afterwards; it is not a cache-presence test. The old size-only block at
+   least gated on the PFS vtable and read `[_dev+0x88]`; adding the
+   `[_f+0x88]` fallback is the regression that turns the probe into a
+   fabrication.
 
 2. **The bind runs before the device is used.** The insertion point is right
    after `vm_write32(FileStream+0x44, FileObject)`. Before `0x9F3F2C` opens
@@ -429,14 +451,19 @@ The existing probes are not yet sufficient to identify the mount match:
    * `0x9F4AA0`: `[FileStream+0x4C]` state/vtable/`+0x90`, and the actual
      cache owner (not `FileObject+0x88`).
 
-3. **Patch the selection, not the object.** The smallest correct change is
-   expected to make the W2 cache/bdmark branch return the PFS-backed object
-   that owns `[PFS object+0x88]` (the same object `0xA422A0` attaches to), or
-   make the `PDIPFS_bdmark` path select that object instead of the host
-   marker. Do not overwrite `FileObject+0x40` with a read state; do not use
-   `FileObject+0x88` as a cache; do not hardcode `0xEA57` or write cache
-   bytes. If the trace shows the host object is produced by a different mount
-   match, fix that match/key at `0x9F8E40` instead.
+3. **Patch the selection, not the object.** The sibling-key evidence leaves
+   two candidates, to be decided by the trace:
+   * if `PDIPFS_bdmark/<key>` is meant to be a zero-length existence marker,
+     the `HFileReader` should not read payload from it; the game should open
+     the source `.../PDIPFS/K/W2` (or the cache owner) after the check;
+   * if the marker is meant to alias the source, route
+     `.../PDIPFS_bdmark/...` to the cache-aware PFS mount so its `FileObject`
+     is the PFS/cache owner, not the host marker.
+
+   Either way, the change belongs at the mount match/key (`0x9F8E40`) or the
+   PFS source open (`0x9FDAAC`), not at `FileObject+0x40`. Do not overwrite the
+   device with a read state; do not use `FileObject+0x88` as a cache; do not
+   hardcode `0xEA57` or write cache bytes.
 
 4. **Accept only a guest-produced result.** Verify:
    * `0xA40FBC` with `size=0xEA57`, then `0xA40984` blocks 0..7;

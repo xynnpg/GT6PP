@@ -101,6 +101,63 @@ def add_script_hooks(root: Path) -> int:
     return changed
 
 
+# Boot/presents probes.  The menu worker (0x6CD8F8 -> 0xA11F20 -> entry
+# 0x14E0088 -> 0xA122D4) is alive for the whole measured run, so the missing
+# event is the engine update that consumes the project request queued by
+# MGOM.start("boot") at manager+0x48/+0x50.  These hooks are read-only trace
+# points for that handoff; none writes guest state.
+BOOT_PRESENTS_HOOKS = (
+    ("ppu_recomp_023.cpp", "func_00A11F20", "gt6_menu_worker_prepare"),
+    ("ppu_recomp_023.cpp", "func_00A122D4", "gt6_menu_worker_entry"),
+    ("ppu_recomp_015.cpp", "func_006C54DC", "gt6_mgom_start_probe"),
+    ("ppu_recomp_015.cpp", "func_006C4DC0", "gt6_mgom_setroot_probe"),
+    ("ppu_recomp_012.cpp", "func_00568C94", "gt6_menu_project_request"),
+)
+
+
+def add_boot_presents_hooks(root: Path) -> int:
+    by_file: dict[str, list[tuple[str, str]]] = {}
+    for filename, func, hook in BOOT_PRESENTS_HOOKS:
+        by_file.setdefault(filename, []).append((func, hook))
+
+    changed = 0
+    for filename, hooks in by_file.items():
+        path = root / filename
+        if not path.exists():
+            print(f"warning: {filename} not found; boot/presents hooks skipped",
+                  file=sys.stderr)
+            continue
+        s = path.read_text(encoding="latin-1")
+        file_changed = False
+
+        inc = '#include "ppu_recomp.h"\n'
+        if inc in s:
+            missing = "".join(
+                f'extern "C" void {hook}(ppu_context* ctx);\n'
+                for _, hook in hooks
+                if f'extern "C" void {hook}(ppu_context* ctx);' not in s)
+            if missing:
+                s = s.replace(inc, inc + missing, 1)
+                file_changed = True
+
+        for func, hook in hooks:
+            key = f"void {func}(ppu_context* ctx) {{\n    PPU_MM_SNAP\n"
+            call = f"        {hook}(ctx);\n"
+            if call in s:
+                continue
+            if s.count(key) != 1:
+                print(f"warning: {func} not found exactly once in {filename}",
+                      file=sys.stderr)
+                continue
+            s = s.replace(key, key + call, 1)
+            file_changed = True
+
+        if file_changed:
+            path.write_text(s, encoding="latin-1")
+            changed += 1
+    return changed
+
+
 def patch_filedevice_flush(root: Path) -> int:
     """Stop PDIPSX::FileDeviceHost from publishing/dereferencing a dead stack
     FileInternalStreamDefault (guest 0x00A08A74 / 0x00A08B8C).
@@ -169,9 +226,11 @@ def main(argv: list[str]) -> int:
     root = Path(argv[1])
     guards = add_setjmp_guards(root)
     hooks = add_script_hooks(root)
+    boot_hooks = add_boot_presents_hooks(root)
     adch = patch_adch_switch(root)
     filedev_changes = patch_filedevice_flush(root)
     print(f"post-lift: setjmp guards added {guards}; script hooks changed {hooks}; "
+          f"boot/presents hooks changed {boot_hooks}; "
           f"ADCH switch changes {adch}; FileDeviceHost changes {filedev_changes}")
     return 0
 
