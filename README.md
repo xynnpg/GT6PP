@@ -6,7 +6,7 @@ Gran Turismo 6 (PS3 `BCUS98296` v1.00) **statically recompiled for Windows**. Th
 
 **Where the first image comes from:** the RPCS3 oracle runs `boot.adc` -> `presents_sequence_common` -> `PresentsRootSCEA` (`K/WD`): `scei` 2 s, `notice` 2 s, `epilepsy` 4 s, then the intro. The native port currently jumps to the later cursor/menu scripts and never opens `K/LH`, `K/KG`, `K/IE`, `K/WD` or the boot fonts. That boot/presents path is the first-screen blocker - not `K/W2`.
 
-**Cache progress:** the boot/presents keys and the raw `K/W2` slice (`59,991 B`, SHA-256 `2b6153...9008`) are now seeded from the user's own `GT.VOL` into the ignored `work/` HDD tree. The oracle opens the bare `/PDIPFS/K/<key>` files; the native port was opening zero-length `PDIPFS_bdmark` markers instead. Removing that marker path is under test.
+**Cache progress:** the boot/presents keys and the raw `K/W2` slice (`59,991 B`, SHA-256 `2b6153...9008`) are now seeded from the user's own `GT.VOL` into the ignored `work/` HDD tree. The oracle opens the bare `/PDIPFS/K/<key>` files; the native port's cached assets take the `PDIPFS_bdmark` branch, and simply deleting the markers does not help. The remaining W2 blocker is the mount/device selection: the `HFileReader` gets a host `FileObject` instead of the PFS cache owner (`docs/analysis/pfs-mount-device-check.md`).
 
 `Prototypes.adc` is **not** required on v1.00 - the RPCS3 oracle proves the disc reaches the first-run UI without it.
 
@@ -74,7 +74,7 @@ The RPCS3 oracle (`docs/analysis/rpcs3-oracle.md`) confirms the v1.00 disc alone
 
 ## Contributors
 
-- **[@xynnpg](https://github.com/xynnpg)** - project owner, direction, testing, and the RPCS3 oracle runs.
+- **XYMPG ([@xynnpg](https://github.com/xynnpg))** - project owner, direction, testing, and the RPCS3 oracle runs.
 
 See [CONTRIBUTORS.md](CONTRIBUTORS.md) to add yourself.
 

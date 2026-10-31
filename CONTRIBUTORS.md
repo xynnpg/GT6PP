@@ -6,8 +6,9 @@ code.
 
 ## Project owner
 
-- **[@xynnpg](https://github.com/xynnpg)** - direction, requirements, hardware
-  and disc access, RPCS3 oracle runs, visual acceptance, and release decisions.
+- **XYMPG ([@xynnpg](https://github.com/xynnpg))** - project owner, direction,
+  requirements, hardware and disc access, RPCS3 oracle runs, visual acceptance,
+  and release decisions.
 
 ## How to add yourself
 
