@@ -1,0 +1,28 @@
+{
+  "project": "GT6PP",
+  "title": "Gran Turismo 6 - statically recompiled for native Windows",
+  "version": "0.1.0-early-bringup",
+  "status": "early bring-up",
+  "current_gate": "state-2 boot-project continuation (manager remains at state 2)",
+  "next_milestone": "resume state-2 menu project continuation, observe K/IE + K/WD, render first non-black legal frame",
+  "progress": {
+    "system": 70.4,
+    "render": 32.3
+  },
+  "verified_gates": [
+    "Full ADCH boot script read",
+    "Font and file-worker gate",
+    "UI/menu packages loaded",
+    "MGOM.start(\"boot\") request",
+    "D3D12 clears and present path"
+  ],
+  "remaining_gates": [
+    "K/IE BootProject.gpb",
+    "K/WD PresentsRootSCEA.gpb",
+    "Real GPB texture draw",
+    "Non-black legal frame"
+  ],
+  "updated": "2026-11-01",
+  "website": "https://xynnpg.github.io/GT6PP"
+}
+"
