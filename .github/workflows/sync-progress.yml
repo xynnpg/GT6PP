@@ -1,0 +1,96 @@
+name: Sync progress
+
+# progress.json is the single source of truth.
+# Push a change to it and this workflow:
+#   1. validates the JSON
+#   2. regenerates docs/progress.svg + docs/progress.png
+#   3. commits them back to main
+#   4. updates the static fallback numbers on the GT6PP-SITE branch
+#
+# The website also fetches progress.json live, so it updates even before
+# the site-branch commit lands.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - progress.json
+      - tools/make_progress_svg.py
+      - tools/sync_site_progress.py
+      - .github/workflows/sync-progress.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-progress
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Validate progress.json
+        run: |
+          python - <<'PY'
+          import json
+          cfg = json.load(open("progress.json", encoding="utf-8"))
+          progress = cfg["progress"]
+          for key in ("system", "render"):
+              value = float(progress[key])
+              if not 0 <= value <= 100:
+                  raise SystemExit(f"{key} out of range: {value}")
+          print("progress.json OK:", progress)
+          PY
+
+      - name: Regenerate SVG and PNG
+        run: |
+          python tools/make_progress_svg.py
+          if command -v google-chrome >/dev/null 2>&1; then
+            google-chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+              --hide-scrollbars --force-device-scale-factor=1 --window-size=1200,440 \
+              --screenshot="$PWD/docs/progress.png" "file://$PWD/docs/progress.svg"
+          else
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq librsvg2-bin
+            rsvg-convert -w 1200 -h 440 docs/progress.svg -o docs/progress.png
+          fi
+
+      - name: Commit regenerated images
+        run: |
+          if [ -z "$(git status --porcelain docs/progress.svg docs/progress.png)" ]; then
+            echo "Images already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/progress.svg docs/progress.png
+          git commit -m "progress: regenerate SVG/PNG from progress.json"
+          git push
+
+      - name: Sync website fallback values
+        run: |
+          git fetch origin GT6PP-SITE
+          git worktree add ../site origin/GT6PP-SITE --detach
+          python tools/sync_site_progress.py ../site/index.html
+          cd ../site
+          if [ -z "$(git status --porcelain index.html)" ]; then
+            echo "Site already current."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html
+          git commit -m "site: sync progress from progress.json"
+          git push origin HEAD:GT6PP-SITE

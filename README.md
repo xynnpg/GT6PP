@@ -95,6 +95,25 @@ See `ROADMAP.md` for the full plan and `CONTRIBUTORS.md` to join.
 
 ---
 
+## Progress source of truth
+
+All progress numbers, the version, and the current gate live in [`progress.json`](progress.json). Edit that one file, push, and CI does the rest:
+
+- validates the JSON
+- regenerates `docs/progress.svg` and `docs/progress.png`
+- syncs the static fallback numbers on the `GT6PP-SITE` website branch
+- the website also fetches the raw `progress.json` live
+
+Local regeneration:
+
+```powershell
+python tools/make_progress_svg.py
+python tools/sync_site_progress.py ..\GT6PP-SITE\index.html
+```
+
+The automation is [`.github/workflows/sync-progress.yml`](.github/workflows/sync-progress.yml).
+
+---
 
 ## Quick start
 

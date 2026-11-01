@@ -84,7 +84,7 @@ def draw_panel(blocks: list[Block], ox: int, oy: int, title: str, side: str, pct
     out = []
     out.append(f'<rect x="{ox-18}" y="{oy-40}" width="{18*2 + COLS*PITCH + 18}" height="{ROWS*PITCH + 58}" fill="{PANEL}" stroke="{EDGE}"/>')
     pct_text = f": {pct:.1f}%"
-    count_text = f"({done}/{total})"
+    count_text = f"({done}/{total})" if pct_override is None else ""
     out.append(f'<text x="{ox-6}" y="{oy-17}" class="head">{title}</text>')
     out.append(f'<text x="{ox-6}" y="{oy-17}" class="head" dx="{len(title)*8.6 + 8:.1f}" fill="{GREEN}">{pct_text}</text>')
     out.append(f'<text x="{ox-6}" y="{oy-17}" class="head" dx="{len(title)*8.6 + 8 + len(pct_text)*8.6 + 8:.1f}" fill="{MUTED}">{count_text}</text>')

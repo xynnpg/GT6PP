@@ -3,7 +3,7 @@
   "title": "Gran Turismo 6 - statically recompiled for native Windows",
   "version": "0.1.0-early-bringup",
   "status": "early bring-up",
-  "current_gate": "state-2 boot-project continuation (manager remains at state 2)",
+  "current_gate": "resume the real manager's state-2 boot-project continuation, then observe K/IE / K/WD. The genuine frame is still the black cover.",
   "next_milestone": "resume state-2 menu project continuation, observe K/IE + K/WD, render first non-black legal frame",
   "progress": {
     "system": 70.4,
@@ -25,4 +25,3 @@
   "updated": "2026-11-01",
   "website": "https://xynnpg.github.io/GT6PP"
 }
-"
