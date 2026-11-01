@@ -101,8 +101,8 @@
         </div>
       </div>
       <p class="mt-4 text-xs text-mute2 max-w-2xl">
-        Current gate: boot-project handoff (<code class="font-mono">boot.adc</code> / <code class="font-mono">PresentsRootSCEA</code>).
-        The real frame is still the black cover.
+        Current gate: resume the real manager's state-2 boot-project continuation, then observe
+        <code class="font-mono">K/IE</code> / <code class="font-mono">K/WD</code>. The genuine frame is still the black cover.
       </p>
     </section>
 
@@ -116,13 +116,45 @@
         <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-red shrink-0"></span><span><span class="text-white">Font / file-worker gate passed</span> — generation-based lwcond + synchronous host-font reads</span></li>
         <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-red shrink-0"></span><span><span class="text-white">MGOM.start fires</span> and sets the boot-project request</span></li>
         <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-red shrink-0"></span><span><span class="text-white">D3D12 present path reaches the screen</span> — flips and clears land</span></li>
-        <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-mute2 shrink-0"></span><span><span class="text-white">First visible frame still in progress</span> — boot-project handoff pending</span></li>
+        <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-mute2 shrink-0"></span><span><span class="text-white">First visible frame still in progress</span> — manager remains at state 2; <code class="font-mono text-xs">K/IE</code> and <code class="font-mono text-xs">K/WD</code> are not yet observed</span></li>
         <li class="py-3 flex gap-3 text-sm"><span class="mt-1.5 w-1.5 h-1.5 rounded-full bg-mute2 shrink-0"></span><span><span class="text-white">Far from playable</span></span></li>
       </ul>
       <p class="mt-4 text-sm text-mute leading-relaxed">
         The RPCS3 oracle confirms the v1.00 disc alone reaches the legal / loading screen, first-run UI and intro.
         <code class="font-mono text-xs">Prototypes.adc</code> is a native loader artifact, not a missing game file.
       </p>
+    </section>
+
+    <!-- VERIFIED PROGRESS -->
+    <section class="reveal py-12 border-t border-line">
+      <h2 class="mb-6">Verified progress</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-6 text-sm">
+        <div class="surface">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-white font-medium">Completed gates</span>
+            <span class="font-mono text-xs text-red">5 confirmed</span>
+          </div>
+          <ul class="space-y-2 text-mute">
+            <li><span class="text-red mr-2">✓</span>Full ADCH boot script read</li>
+            <li><span class="text-red mr-2">✓</span>Font and file-worker gate</li>
+            <li><span class="text-red mr-2">✓</span>UI/menu packages loaded</li>
+            <li><span class="text-red mr-2">✓</span><code class="font-mono text-xs">MGOM.start("boot")</code> request</li>
+            <li><span class="text-red mr-2">✓</span>D3D12 clears and present path</li>
+          </ul>
+        </div>
+        <div class="surface">
+          <div class="flex items-center justify-between mb-4">
+            <span class="text-white font-medium">Remaining gates</span>
+            <span class="font-mono text-xs text-mute2">0/4 confirmed</span>
+          </div>
+          <ul class="space-y-2 text-mute">
+            <li><span class="text-mute2 mr-2">○</span><code class="font-mono text-xs">K/IE</code> BootProject.gpb</li>
+            <li><span class="text-mute2 mr-2">○</span><code class="font-mono text-xs">K/WD</code> PresentsRootSCEA.gpb</li>
+            <li><span class="text-mute2 mr-2">○</span>Real GPB texture draw</li>
+            <li><span class="text-mute2 mr-2">○</span>Non-black legal frame</li>
+          </ul>
+        </div>
+      </div>
     </section>
 
     <!-- WHAT THIS IS -->
@@ -193,8 +225,8 @@
     <section class="reveal py-12 border-t border-line">
       <h2 class="mb-6">Next up</h2>
       <ol class="space-y-4 text-sm text-mute max-w-3xl">
-        <li class="flex gap-4"><span class="font-mono text-red">01</span><span>Fix the lwcond / file-worker completion wake so <code class="font-mono text-xs text-white">initApp</code> and <code class="font-mono text-xs text-white">MainLoop</code> stop dropping script frames.</span></li>
-        <li class="flex gap-4"><span class="font-mono text-red">02</span><span>Load <code class="font-mono text-xs text-white">boot.adc</code> / <code class="font-mono text-xs text-white">PresentsRootSCEA</code> and render the first non-black legal frame with <code class="font-mono text-xs text-white">GT6_BRINGUP_DDS=0</code>.</span></li>
+        <li class="flex gap-4"><span class="font-mono text-red">01</span><span>Resume the state-2 menu project continuation through the original callback/update path without forcing cleanup.</span></li>
+        <li class="flex gap-4"><span class="font-mono text-red">02</span><span>Observe <code class="font-mono text-xs text-white">K/IE</code> / <code class="font-mono text-xs text-white">K/WD</code>, bind a real GPB texture, and render the first non-black legal frame with <code class="font-mono text-xs text-white">GT6_BRINGUP_DDS=0</code>.</span></li>
         <li class="flex gap-4"><span class="font-mono text-red">03</span><span>Then menus, audio and input; in-engine PAMF playback is a separate clean-room HLE task.</span></li>
       </ol>
     </section>
