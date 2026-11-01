@@ -7,291 +7,414 @@
   <meta name="description" content="Experimental static recompilation of Gran Turismo 6 (PS3) to native Windows. No emulator at runtime." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Outfit', 'system-ui', 'sans-serif'],
+            mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+          },
+          colors: {
+            ink: '#0a0a0b',
+            panel: '#141418',
+            line: '#26262d',
+            mute: '#a1a1aa',
+            red: '#c8102e',
+            redb: '#e11d48',
+          },
+        },
+      },
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js" defer></script>
   <style>
-    :root {
-      --bg: #070707;
-      --surface: #111111;
-      --border: #222;
-      --text: #f2f2f2;
-      --muted: #8a8a8a;
-      --gt-red: #c8102e;
-      --gt-red-dim: #8a0b1f;
+    html { scroll-behavior: smooth; }
+    body { background: #0a0a0b; color: #f4f4f5; }
+    * { color: inherit; }
+    h1 { font-size: 3.5rem; font-weight: 800; line-height: 0.95; }
+    h2 { font-size: 2.25rem; font-weight: 700; line-height: 1.1; }
+    h3 { font-size: 1.25rem; font-weight: 600; line-height: 1.2; }
+    .ambient {
+      position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background:
+        radial-gradient(1100px 700px at 85% -5%, rgba(200,16,46,0.16), transparent 55%),
+        radial-gradient(900px 600px at 5% 15%, rgba(200,16,46,0.07), transparent 60%),
+        radial-gradient(700px 500px at 50% 110%, rgba(200,16,46,0.05), transparent 60%);
     }
-
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-
-    body {
-      font-family: "Archivo", system-ui, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.55;
-      font-size: 17px;
-      -webkit-font-smoothing: antialiased;
-      text-align: center;
+    .grain {
+      position: fixed; inset: 0; pointer-events: none; z-index: 1; opacity: 0.04;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
     }
-
-    .wrap {
-      max-width: 640px;
-      margin: 0 auto;
-      padding: 0 1.5rem;
+    .surface {
+      background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.015));
+      border: 1px solid rgba(255,255,255,0.08);
+      backdrop-filter: blur(14px);
+      -webkit-backdrop-filter: blur(14px);
+      padding: 1.5rem;
     }
-
-    header {
-      padding: 6rem 0 5rem;
+    .tile { padding: 1.5rem; }
+    .bar > span { transition: width 1.2s cubic-bezier(0.16,1,0.3,1); }
+    .reveal { opacity: 0; transform: translateY(28px); }
+    .reveal.in { opacity: 1; transform: none; transition: opacity .8s cubic-bezier(0.16,1,0.3,1), transform .8s cubic-bezier(0.16,1,0.3,1); }
+    @media (prefers-reduced-motion: reduce) {
+      .reveal { opacity: 1; transform: none; transition: none; }
     }
-
-    h1 {
-      font-size: clamp(3rem, 9vw, 4.2rem);
-      font-weight: 700;
-      letter-spacing: -0.04em;
-      line-height: 1;
-      margin-bottom: 1.15rem;
-    }
-
-    .lead {
-      font-size: 1.15rem;
-      color: var(--muted);
-      max-width: 28ch;
-      margin: 0 auto 2.4rem;
-      line-height: 1.5;
-    }
-
-    .actions {
-      display: flex;
-      gap: 1.4rem;
-      justify-content: center;
-      align-items: center;
-      flex-wrap: wrap;
-    }
-
-    .btn {
-      display: inline-block;
-      background: var(--gt-red);
-      color: #fff;
-      font-weight: 600;
-      font-size: 0.95rem;
-      padding: 0.75rem 1.5rem;
-      text-decoration: none;
-      border-radius: 2px;
-      transition: background 0.15s;
-    }
-    .btn:hover { background: #e01235; }
-
-    .link {
-      color: var(--muted);
-      font-size: 0.95rem;
-      text-decoration: none;
-      border-bottom: 1px solid #333;
-      padding-bottom: 1px;
-    }
-    .link:hover { color: var(--text); border-color: var(--muted); }
-
-    section {
-      padding: 3.8rem 0;
-      border-top: 1px solid var(--border);
-    }
-
-    h2 {
-      font-size: 1.05rem;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-transform: uppercase;
-      color: var(--muted);
-      margin-bottom: 1.5rem;
-    }
-
-    p {
-      color: var(--muted);
-      margin-bottom: 1rem;
-      max-width: 42ch;
-      margin-left: auto;
-      margin-right: auto;
-    }
-
-    .status {
-      list-style: none;
-      display: inline-block;
-      text-align: left;
-      margin-top: 0.5rem;
-    }
-    .status li {
-      display: grid;
-      grid-template-columns: 1.1rem 1fr;
-      gap: 0.9rem;
-      padding: 0.38rem 0;
-      color: var(--muted);
-      font-size: 0.98rem;
-    }
-    .status .ok::before {
-      content: "";
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: var(--gt-red);
-      margin-top: 0.55rem;
-    }
-    .status .wip::before {
-      content: "";
-      width: 7px;
-      height: 7px;
-      border-radius: 50%;
-      background: #333;
-      margin-top: 0.55rem;
-    }
-
-    .table-wrap {
-      overflow-x: auto;
-      margin-top: 0.5rem;
-    }
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.95rem;
-      text-align: left;
-    }
-    th {
-      font-weight: 500;
-      color: var(--muted);
-      padding: 0.65rem 0.8rem 0.65rem 0;
-      border-bottom: 1px solid var(--border);
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-    }
-    td {
-      padding: 0.85rem 0.8rem 0.85rem 0;
-      border-bottom: 1px solid var(--border);
-      color: var(--muted);
-      vertical-align: top;
-    }
-    td:first-child {
-      color: var(--text);
-      font-weight: 500;
-      width: 30%;
-    }
-
-    .note {
-      border-left: 3px solid var(--gt-red-dim);
-      padding: 0.9rem 0 0.9rem 1.25rem;
-      color: var(--muted);
-      font-size: 0.95rem;
-      max-width: 40ch;
-      margin: 0 auto;
-      text-align: left;
-    }
-
-    footer {
-      padding: 3.5rem 0 4.5rem;
-      border-top: 1px solid var(--border);
-      font-size: 0.88rem;
-      color: var(--muted);
-    }
-    footer a {
-      color: var(--muted);
-      text-decoration: none;
-    }
-    footer a:hover { color: var(--text); }
+    .bmc img { transition: transform .15s ease; }
+    .bmc:hover img { transform: scale(1.03); }
+    .tile { transition: border-color .2s, background .2s, transform .2s; }
+    .tile:hover { border-color: rgba(200,16,46,0.4); background: rgba(255,255,255,0.03); transform: translateY(-2px); }
+    .imgzoom { overflow: hidden; }
+    .imgzoom img { transition: transform .7s cubic-bezier(0.16,1,0.3,1); }
+    .imgzoom:hover img { transform: scale(1.06); }
   </style>
 </head>
-<body>
-  <div class="wrap">
-    <header>
-      <h1>GT6PP</h1>
-      <p class="lead">
-        Gran Turismo 6, statically recompiled for native Windows.<br>
-        No emulator. Pure x86-64.
-      </p>
-      <div class="actions">
-        <a class="btn" href="https://github.com/xynnpg/GT6PP">View on GitHub</a>
-        <a class="link" href="https://github.com/xynnpg/GT6PP#readme">Technical README →</a>
+<body class="text-zinc-100 font-sans antialiased">
+  <div class="ambient"></div>
+  <div class="grain"></div>
+
+  <nav class="fixed top-0 inset-x-0 z-50 backdrop-blur-xl bg-ink/60 border-b border-white/5">
+    <div class="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
+      <a href="#top" class="flex items-center gap-2.5 font-bold tracking-tight">
+        <span class="w-7 h-7 rounded-md bg-red grid place-items-center font-mono text-[10px] text-white">GT</span>
+        <span>GT6PP</span>
+      </a>
+      <div class="flex items-center gap-6 text-sm text-mute">
+        <a href="https://github.com/xynnpg/GT6PP" class="hidden md:inline hover:text-white transition-colors">GitHub</a>
+        <a href="https://github.com/xynnpg/GT6PP#readme" class="hidden md:inline hover:text-white transition-colors">README</a>
+        <a href="https://www.buymeacoffee.com/xynnpg" target="_blank" rel="noopener" class="px-4 py-2 rounded-lg bg-red text-white font-semibold text-xs hover:bg-redb transition-colors active:scale-95">Support</a>
       </div>
-    </header>
+    </div>
+  </nav>
 
-    <section>
-      <h2>What this is</h2>
-      <p>
-        An experimental static recompilation of the PlayStation 3 version of
-        <em>Gran Turismo 6</em> (BCUS98296). The game’s PPU code is translated
-        ahead of time into C++ and built as a regular Windows executable.
-      </p>
-      <p>
-        This is not an emulator. There is no runtime interpretation of PS3
-        instructions. The long-term goal is a true native port.
-      </p>
-    </section>
-
-    <section>
-      <h2>Where it stands</h2>
-      <ul class="status">
-        <li class="ok">Boots and reaches the legal / first-run path</li>
-        <li class="ok">Full ADCH boot script parsed (857 KB)</li>
-        <li class="ok">UI packages and menu scripts load</li>
-        <li class="ok">D3D12 present path reaches the screen</li>
-        <li class="wip">First visible frame still in progress</li>
-        <li class="wip">Far from playable</li>
-      </ul>
-    </section>
-
-    <section>
-      <h2>Static recomp vs emulator</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th></th>
-              <th>GT6PP</th>
-              <th>RPCS3</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Approach</td>
-              <td>Static recompilation</td>
-              <td>Dynamic recompilation</td>
-            </tr>
-            <tr>
-              <td>Runtime</td>
-              <td>Native x86-64 binary</td>
-              <td>Emulator process</td>
-            </tr>
-            <tr>
-              <td>Current state</td>
-              <td>Early bring-up</td>
-              <td>Playable with issues</td>
-            </tr>
-          </tbody>
-        </table>
+  <main id="top" class="relative z-10">
+    <!-- HERO -->
+    <section class="pt-32 md:pt-40 pb-24 md:pb-32">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12 lg:gap-16 items-center">
+        <div class="lg:col-span-7">
+          <h1 class="text-5xl md:text-7xl lg:text-[5.25rem] font-extrabold tracking-tighter leading-[0.92] max-w-4xl">
+            Gran Turismo 6,<br>
+            <span class="text-red">recompiled native.</span>
+          </h1>
+          <p class="mt-6 text-lg md:text-xl text-mute max-w-2xl leading-relaxed">
+            An experimental static recompilation of the PS3 version of Gran Turismo 6 (BCUS98296)
+            into a native x86-64 Windows binary. No emulator at runtime. A true native port in progress.
+          </p>
+          <div class="mt-9 flex flex-wrap gap-3">
+            <a href="https://github.com/xynnpg/GT6PP" class="px-6 py-3.5 rounded-xl bg-red text-white font-semibold hover:bg-redb transition-colors active:scale-[0.96] whitespace-nowrap">View on GitHub</a>
+            <a href="https://github.com/xynnpg/GT6PP#readme" class="px-6 py-3.5 rounded-xl surface text-white font-semibold hover:bg-white/5 transition-colors active:scale-[0.96] whitespace-nowrap">Technical README →</a>
+          </div>
+        </div>
+        <aside class="lg:col-span-5 surface rounded-2xl">
+          <div class="font-mono text-[10px] tracking-[0.22em] text-mute uppercase mb-5">Bring-up progress</div>
+          <div class="space-y-5">
+            <div>
+              <div class="flex justify-between items-baseline mb-2">
+                <span class="text-sm font-medium">System</span>
+                <span class="font-mono text-xs text-mute">72.4%</span>
+              </div>
+              <div class="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                <span class="block h-full rounded-full bg-gradient-to-r from-[#8a0b1f] to-red" style="width:72.4%"></span>
+              </div>
+            </div>
+            <div>
+              <div class="flex justify-between items-baseline mb-2">
+                <span class="text-sm font-medium">Render</span>
+                <span class="font-mono text-xs text-mute">32.3%</span>
+              </div>
+              <div class="h-1.5 rounded-full bg-white/5 overflow-hidden">
+                <span class="block h-full rounded-full bg-gradient-to-r from-[#8a0b1f] to-red" style="width:32.3%"></span>
+              </div>
+            </div>
+          </div>
+          <div class="mt-6 pt-5 border-t border-white/5 text-sm text-mute leading-relaxed">
+            <span class="text-white font-medium">Current gate:</span> boot-project handoff
+            (<code class="font-mono text-xs text-red">boot.adc</code> / <code class="font-mono text-xs text-red">PresentsRootSCEA</code>).<br>
+            The real frame is still the black cover; the next milestone is the first non-black legal frame.
+          </div>
+        </aside>
       </div>
     </section>
 
-    <section>
-      <h2>Legal</h2>
-      <div class="note">
-        This repository contains no game assets or copyrighted material from
-        Gran Turismo 6. You must supply your own legally obtained disc files.
-        Unofficial research project. Not affiliated with Sony or Polyphony Digital.
+    <!-- WHERE IT STANDS -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12">
+        <div class="lg:col-span-4">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight leading-tight">Where it stands</h2>
+          <p class="mt-4 text-mute">Recent bring-up milestones on the native port.</p>
+        </div>
+        <div class="lg:col-span-8">
+          <ul class="divide-y divide-white/5">
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300">Boots and presents a <span class="text-white font-medium">1280×720 window</span></span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300">Full <span class="text-white font-medium">ADCH boot script parsed</span> — 857 KB, 255k reads to EOF</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">UI packages and menu scripts load</span> — MenuClassDefine, cursor.*, arcade/option/gtmode/garage/gtauto</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">Font / file-worker gate passed</span> — generation-based lwcond + synchronous host-font reads</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">MGOM.start fires</span> and sets the boot-project request</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-red shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">D3D12 present path reaches the screen</span> — flips and clears land</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-zinc-600 shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">First visible frame still in progress</span> — boot-project handoff pending</span></li>
+            <li class="flex gap-4 py-4"><span class="mt-2 w-2 h-2 rounded-full bg-zinc-600 shrink-0"></span><span class="text-zinc-300"><span class="text-white font-medium">Far from playable</span></span></li>
+          </ul>
+          <p class="mt-6 text-sm text-mute leading-relaxed max-w-3xl">
+            The RPCS3 oracle confirms the v1.00 disc alone reaches the legal / loading screen, first-run UI and intro.
+            <code class="font-mono text-xs">Prototypes.adc</code> is a native loader artifact, not a missing game file. The real frame is still the
+            black cover; the next gate is loading <code class="font-mono text-xs">boot.adc</code> / <code class="font-mono text-xs">PresentsRootSCEA</code>.
+          </p>
+        </div>
       </div>
     </section>
 
-    <section>
-      <h2>Contribute</h2>
-      <p>
-        Still very early. Experience with PS3 reverse engineering, static
-        recompilation, D3D12, or the GT engine is useful. Issues and discussion
-        are open on the repository.
-      </p>
-      <div class="actions" style="margin-top: 1.75rem;">
-        <a class="btn" href="https://github.com/xynnpg/GT6PP">GitHub Repository</a>
+    <!-- WHAT THIS IS -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12">
+        <div class="lg:col-span-5">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight leading-tight">What this is</h2>
+        </div>
+        <div class="lg:col-span-7 space-y-5 text-mute text-lg leading-relaxed max-w-3xl">
+          <p>
+            An experimental static recompilation of the PlayStation 3 version of
+            <span class="text-white font-medium">Gran Turismo 6</span> (BCUS98296). The game’s PPU code is translated
+            ahead of time into C++ and built as a regular Windows executable.
+          </p>
+          <p>
+            This is <span class="text-white font-medium">not an emulator</span>. There is no runtime interpretation of PS3
+            instructions. The long-term goal is a true native port.
+          </p>
+          <p>
+            The project ships code and documentation only. No game assets or copyrighted material are included —
+            you must supply your own legally obtained disc files.
+          </p>
+        </div>
       </div>
     </section>
 
-    <footer>
-      <p>
-        GT6PP · <a href="https://github.com/xynnpg">@xynnpg</a><br>
-        <a href="https://github.com/xynnpg/GT6PP">github.com/xynnpg/GT6PP</a>
-      </p>
-    </footer>
-  </div>
+    <!-- RECOMP VS EMULATOR -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6">
+        <h2 class="text-3xl md:text-4xl font-bold tracking-tight mb-10">Static recomp vs. emulator</h2>
+        <div class="surface rounded-2xl overflow-hidden">
+          <table class="w-full text-left text-sm">
+            <thead class="bg-white/[0.03]">
+              <tr>
+                <th class="px-6 py-4 font-medium text-mute uppercase tracking-wider text-xs"></th>
+                <th class="px-6 py-4 font-medium text-white">GT6PP</th>
+                <th class="px-6 py-4 font-medium text-mute">RPCS3</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-white/5">
+              <tr>
+                <td class="px-6 py-5 text-white font-medium">Approach</td>
+                <td class="px-6 py-5 text-zinc-300">Static recompilation</td>
+                <td class="px-6 py-5 text-mute">Dynamic recompilation</td>
+              </tr>
+              <tr>
+                <td class="px-6 py-5 text-white font-medium">Runtime</td>
+                <td class="px-6 py-5 text-zinc-300">Native x86-64 binary</td>
+                <td class="px-6 py-5 text-mute">Emulator process</td>
+              </tr>
+              <tr>
+                <td class="px-6 py-5 text-white font-medium">Current state</td>
+                <td class="px-6 py-5 text-zinc-300">Early bring-up</td>
+                <td class="px-6 py-5 text-mute">Playable with issues</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <!-- WHAT WORKS BENTO -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6">
+        <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-6 mb-12">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight">What works</h2>
+          <p class="text-mute max-w-md">The systems that are already functional on the native port.</p>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-6 gap-4 grid-flow-dense">
+          <div class="tile md:col-span-3 md:row-span-2 surface rounded-2xl flex flex-col justify-between min-h-[220px]">
+            <div>
+              <div class="font-mono text-[10px] tracking-[0.22em] text-red uppercase mb-3">Core</div>
+              <h3 class="text-xl font-semibold">PPU lift</h3>
+              <p class="text-mute text-sm mt-2 leading-relaxed">75,652 functions; 70,989 corrected boundaries. The whole game codebase, translated ahead of time.</p>
+            </div>
+            <div class="font-mono text-3xl font-bold text-white mt-6">75,652</div>
+          </div>
+          <div class="tile md:col-span-3 surface rounded-2xl flex items-center gap-5">
+            <div class="font-mono text-2xl font-bold text-white shrink-0">4,207</div>
+            <div>
+              <h3 class="font-semibold">GT.VOL</h3>
+              <p class="text-mute text-sm mt-1">Opens; 32,591 files indexed.</p>
+            </div>
+          </div>
+          <div class="tile md:col-span-2 surface rounded-2xl">
+            <h3 class="font-semibold">Boot script</h3>
+            <p class="text-mute text-sm mt-2">Full ADCH012 parse; 255,264 reads to EOF.</p>
+          </div>
+          <div class="tile md:col-span-2 surface rounded-2xl">
+            <h3 class="font-semibold">SPU / SPURS</h3>
+            <p class="text-mute text-sm mt-2">15 runtime job images lifted; dispatch returns rc=0.</p>
+          </div>
+          <div class="tile md:col-span-2 surface rounded-2xl">
+            <h3 class="font-semibold">HLE / threads</h3>
+            <p class="text-mute text-sm mt-2">1,216 NID handlers; SPU event-handler crash fixed.</p>
+          </div>
+          <div class="tile md:col-span-3 surface rounded-2xl">
+            <h3 class="font-semibold">Present / clears</h3>
+            <p class="text-mute text-sm mt-2">Flips and CLEAR_SURFACE reach D3D12.</p>
+          </div>
+          <div class="tile md:col-span-3 surface rounded-2xl">
+            <h3 class="font-semibold">UI scripts</h3>
+            <p class="text-mute text-sm mt-2">MenuClassDefine, Prototypes.mwidget, cursor.* load.</p>
+          </div>
+          <div class="tile md:col-span-3 surface rounded-2xl">
+            <h3 class="font-semibold">PFS cache</h3>
+            <p class="text-mute text-sm mt-2">Boot/presents + font slices seeded from GT.VOL.</p>
+          </div>
+          <div class="tile md:col-span-3 surface rounded-2xl">
+            <h3 class="font-semibold">Frame capture</h3>
+            <p class="text-mute text-sm mt-2">Backbuffer BMP + verifier (no desktop screenshots).</p>
+          </div>
+          <div class="tile md:col-span-6 surface rounded-2xl flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+            <div>
+              <h3 class="font-semibold">Intro (offline)</h3>
+              <p class="text-mute text-sm mt-1">cryptmovie → PAMF0041 → demux → 136 s 1080p H.264/AAC.</p>
+            </div>
+            <div class="font-mono text-xs text-mute">PAMF playback is a separate clean-room HLE task</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- PROGRESS MAP -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6">
+        <div class="grid grid-cols-1 lg:grid-cols-12 gap-10 items-end mb-10">
+          <div class="lg:col-span-6">
+            <h2 class="text-3xl md:text-4xl font-bold tracking-tight">Progress map</h2>
+          </div>
+          <div class="lg:col-span-6">
+            <p class="text-mute">A dense view of the bring-up status across the system.</p>
+          </div>
+        </div>
+        <figure class="surface rounded-2xl overflow-hidden imgzoom">
+          <img src="progress.png" alt="GT6PP bring-up status grid" loading="lazy" class="w-full h-auto" />
+          <figcaption class="px-6 py-4 text-xs font-mono text-mute border-t border-white/5">docs/progress.png · rendered from docs/progress.svg</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <!-- NEXT UP -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12">
+        <div class="lg:col-span-4">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight">Next up</h2>
+        </div>
+        <div class="lg:col-span-8">
+          <ol class="space-y-0">
+            <li class="flex gap-6 py-6 border-b border-white/5">
+              <span class="font-mono text-red text-sm pt-1">01</span>
+              <span class="text-zinc-300 leading-relaxed">Fix the lwcond / file-worker completion wake so <code class="font-mono text-xs text-white">initApp</code> and <code class="font-mono text-xs text-white">MainLoop</code> stop dropping script frames.</span>
+            </li>
+            <li class="flex gap-6 py-6 border-b border-white/5">
+              <span class="font-mono text-red text-sm pt-1">02</span>
+              <span class="text-zinc-300 leading-relaxed">Load <code class="font-mono text-xs text-white">boot.adc</code> / <code class="font-mono text-xs text-white">PresentsRootSCEA</code> and render the first non-black legal frame with <code class="font-mono text-xs text-white">GT6_BRINGUP_DDS=0</code>.</span>
+            </li>
+            <li class="flex gap-6 py-6">
+              <span class="font-mono text-red text-sm pt-1">03</span>
+              <span class="text-zinc-300 leading-relaxed">Then menus, audio and input; in-engine PAMF playback is a separate clean-room HLE task.</span>
+            </li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <!-- CONTRIBUTE -->
+    <section id="contribute" class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12 items-center">
+        <div class="lg:col-span-7">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight">Contribute</h2>
+          <p class="mt-5 text-mute text-lg leading-relaxed max-w-2xl">
+            Still very early. Experience with PS3 reverse engineering, static recompilation, D3D12, or the GT engine
+            is useful. Issues and discussion are open on the repository.
+          </p>
+          <div class="mt-8 flex flex-wrap gap-3">
+            <a href="https://github.com/xynnpg/GT6PP" class="px-6 py-3.5 rounded-xl bg-red text-white font-semibold hover:bg-redb transition-colors active:scale-[0.96] whitespace-nowrap">GitHub Repository</a>
+            <a href="https://github.com/xynnpg/GT6PP#readme" class="px-6 py-3.5 rounded-xl surface text-white font-semibold hover:bg-white/5 transition-colors active:scale-[0.96] whitespace-nowrap">Technical README →</a>
+          </div>
+        </div>
+        <div class="lg:col-span-5 flex flex-col items-start lg:items-end gap-4">
+          <p class="text-mute text-sm max-w-xs lg:text-right">If this project is useful to you, you can support the work.</p>
+          <a class="bmc" href="https://www.buymeacoffee.com/xynnpg" target="_blank" rel="noopener" aria-label="Buy Me A Coffee">
+            <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="217" height="60" loading="lazy" />
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <!-- LEGAL -->
+    <section class="reveal py-24 md:py-36 border-t border-white/5">
+      <div class="max-w-7xl mx-auto px-6 grid grid-cols-1 lg:grid-cols-12 gap-12">
+        <div class="lg:col-span-4">
+          <h2 class="text-3xl md:text-4xl font-bold tracking-tight">Legal</h2>
+        </div>
+        <div class="lg:col-span-8">
+          <div class="border-l-2 border-[#8a0b1f]/60 pl-6 text-mute leading-relaxed max-w-3xl">
+            This repository contains no game assets or copyrighted material from Gran Turismo 6.
+            You must supply your own legally obtained disc files. Unofficial research project.
+            Not affiliated with Sony or Polyphony Digital.
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="relative z-10 border-t border-white/5 py-10">
+    <div class="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between gap-6">
+      <div class="text-sm text-mute">GT6PP · <a href="https://github.com/xynnpg" class="hover:text-white transition-colors">@xynnpg</a></div>
+      <div class="flex items-center gap-6">
+        <a href="https://github.com/xynnpg/GT6PP" class="text-sm text-mute hover:text-white transition-colors">github.com/xynnpg/GT6PP</a>
+        <a class="bmc" href="https://www.buymeacoffee.com/xynnpg" target="_blank" rel="noopener" aria-label="Buy Me A Coffee">
+          <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="140" height="38" loading="lazy" style="height:38px;width:auto;border-radius:6px;" />
+        </a>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // reveal on scroll
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((e) => {
+        if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.1, rootMargin: '0px 0px -60px 0px' });
+    document.querySelectorAll('.reveal').forEach((el) => io.observe(el));
+
+    // GSAP enhancements
+    window.addEventListener('load', () => {
+      if (typeof gsap === 'undefined') return;
+      gsap.registerPlugin(ScrollTrigger);
+
+      // progress image scale-in
+      const img = document.querySelector('figure img');
+      if (img) {
+        gsap.fromTo(img, { scale: 0.92, opacity: 0.6 }, {
+          scale: 1, opacity: 1, ease: 'none',
+          scrollTrigger: { trigger: img, start: 'top 85%', end: 'top 40%', scrub: true }
+        });
+      }
+
+      // next-up items stagger reveal
+      gsap.utils.toArray('ol > li').forEach((li, i) => {
+        gsap.fromTo(li, { y: 30, opacity: 0 }, {
+          y: 0, opacity: 1, duration: 0.7, ease: 'power3.out',
+          scrollTrigger: { trigger: li, start: 'top 90%' }
+        });
+      });
+
+      // hero parallax on ambient is skipped; keep light.
+    });
+  </script>
 </body>
 </html>
