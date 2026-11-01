@@ -1,10 +1,10 @@
-# Status — 2026-10-31
+# Status — 2026-11-01
 
-> **Current state:** boot script parses fully; UI scripts load; black 1280×720
-> window presents with `draws: 0`. See
-> [analysis/CONTINUE-HERE.md](analysis/CONTINUE-HERE.md) for the live handoff.
-> The tables below are the earlier measured snapshot; re-run the commands
-> before trusting a number after a new lift.
+> **Current state (2026-11-01):** boot script parses fully; UI scripts load; `MGOM.start("boot")`
+> fires and the native pump reaches the real manager's pending-project state. Manager remains at
+> state 2 after `boot.mproject`/`boot.adc`; no `K/IE` or `K/WD` request and no real textured draw
+> verified. Black 1280x720 window. See [analysis/boot-project-handoff-fix.md](analysis/boot-project-handoff-fix.md)
+> for the state-2 blocker.
 
 ## Media
 
