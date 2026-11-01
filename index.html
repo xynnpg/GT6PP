@@ -56,7 +56,10 @@
 <body class="font-sans antialiased">
   <nav class="border-b border-line">
     <div class="max-w-6xl mx-auto px-6 h-14 flex items-center justify-between">
-      <a href="#top" class="font-semibold tracking-tight">GT6PP</a>
+      <a href="#top" class="flex items-baseline gap-2">
+        <span class="font-semibold tracking-tight">GT6PP</span>
+        <span class="font-mono text-[10px] text-mute2" data-version>v0.1.0-early-bringup</span>
+      </a>
       <div class="flex items-center gap-6 text-sm text-mute">
         <a href="https://github.com/xynnpg/GT6PP" class="hover:text-white">GitHub</a>
         <a href="https://github.com/xynnpg/GT6PP#readme" class="hover:text-white">README</a>
@@ -100,9 +103,9 @@
           </div>
         </div>
       </div>
-      <p class="mt-4 text-xs text-mute2 max-w-2xl" data-gate>
-        Current gate: resume the real manager's state-2 boot-project continuation, then observe
-        <code class="font-mono">K/IE</code> / <code class="font-mono">K/WD</code>. The genuine frame is still the black cover.
+      <p class="mt-4 text-xs text-mute2 max-w-2xl" data-gate>Current gate: resume the real manager's state-2 boot-project continuation, then observe K/IE / K/WD. The genuine frame is still the black cover.</p>
+      <p class="mt-2 text-[10px] text-mute2">
+        Source: <a href="https://github.com/xynnpg/GT6PP/blob/main/progress.json" class="underline decoration-line underline-offset-2 hover:text-white">progress.json</a>
       </p>
     </section>
 
@@ -294,7 +297,14 @@
         const gate = d?.current_gate;
         if (gate) {
           const el = document.querySelector('[data-gate]');
-          if (el) { el.textContent = gate; }
+          if (el) {
+            const text = String(gate).trim();
+            el.textContent = 'Current gate: ' + (/[.!?]$/.test(text) ? text : text + '.');
+          }
+        }
+        if (d?.version) {
+          const el = document.querySelector('[data-version]');
+          if (el) { el.textContent = 'v' + d.version; }
         }
       } catch (e) { /* keep static fallback */ }
     })();
