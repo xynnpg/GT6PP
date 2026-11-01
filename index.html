@@ -85,22 +85,22 @@
       <div class="mt-12 grid grid-cols-1 sm:grid-cols-2 gap-6 max-w-2xl">
         <div>
           <div class="flex justify-between text-xs text-mute mb-2">
-            <span>System</span><span class="num">70.4%</span>
+            <span>System</span><span class="num" data-progress="system">70.4%</span>
           </div>
           <div class="h-1 bg-line rounded-full overflow-hidden">
-            <div class="h-full bg-red rounded-full" style="width:70.4%"></div>
+            <div class="h-full bg-red rounded-full" data-bar="system" style="width:70.4%"></div>
           </div>
         </div>
         <div>
           <div class="flex justify-between text-xs text-mute mb-2">
-            <span>Render</span><span class="num">32.3%</span>
+            <span>Render</span><span class="num" data-progress="render">32.3%</span>
           </div>
           <div class="h-1 bg-line rounded-full overflow-hidden">
-            <div class="h-full bg-red rounded-full" style="width:32.3%"></div>
+            <div class="h-full bg-red rounded-full" data-bar="render" style="width:32.3%"></div>
           </div>
         </div>
       </div>
-      <p class="mt-4 text-xs text-mute2 max-w-2xl">
+      <p class="mt-4 text-xs text-mute2 max-w-2xl" data-gate>
         Current gate: resume the real manager's state-2 boot-project continuation, then observe
         <code class="font-mono">K/IE</code> / <code class="font-mono">K/WD</code>. The genuine frame is still the black cover.
       </p>
@@ -270,6 +270,35 @@
     </div>
   </footer>
 
+  <script>
+    // Pull live progress from the single source of truth: progress.json in the main repo.
+    (async function () {
+      try {
+        const r = await fetch('https://raw.githubusercontent.com/xynnpg/GT6PP/refs/heads/main/progress.json', { cache: 'no-store' });
+        if (!r.ok) return;
+        const d = await r.json();
+        const sys = d?.progress?.system;
+        const ren = d?.progress?.render;
+        if (typeof sys === 'number') {
+          const el = document.querySelector('[data-progress="system"]');
+          if (el) { el.textContent = sys.toFixed(1) + '%'; }
+          const bar = document.querySelector('[data-bar="system"]');
+          if (bar) { bar.style.width = sys + '%'; }
+        }
+        if (typeof ren === 'number') {
+          const el = document.querySelector('[data-progress="render"]');
+          if (el) { el.textContent = ren.toFixed(1) + '%'; }
+          const bar = document.querySelector('[data-bar="render"]');
+          if (bar) { bar.style.width = ren + '%'; }
+        }
+        const gate = d?.current_gate;
+        if (gate) {
+          const el = document.querySelector('[data-gate]');
+          if (el) { el.textContent = gate; }
+        }
+      } catch (e) { /* keep static fallback */ }
+    })();
+  </script>
   <script>
     const io = new IntersectionObserver((entries) => {
       entries.forEach((e) => {
