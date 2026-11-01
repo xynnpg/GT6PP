@@ -78,9 +78,9 @@ def cell_fill(block: Block, index: int, cx: int, cy: int) -> tuple[str, str]:
     return DARK, EDGE
 
 
-def draw_panel(blocks: list[Block], ox: int, oy: int, title: str, side: str) -> list[str]:
+def draw_panel(blocks: list[Block], ox: int, oy: int, title: str, side: str, pct_override: float | None = None) -> list[str]:
     done, total = frac_done(blocks)
-    pct = 100.0 * done / total if total else 0.0
+    pct = pct_override if pct_override is not None else (100.0 * done / total if total else 0.0)
     out = []
     out.append(f'<rect x="{ox-18}" y="{oy-40}" width="{18*2 + COLS*PITCH + 18}" height="{ROWS*PITCH + 58}" fill="{PANEL}" stroke="{EDGE}"/>')
     pct_text = f": {pct:.1f}%"
@@ -108,7 +108,19 @@ def draw_panel(blocks: list[Block], ox: int, oy: int, title: str, side: str) -> 
     return out
 
 
+import json as _json
 def main() -> None:
+    # Single source of truth: progress.json at repo root
+    cfg_path = Path(__file__).resolve().parent.parent / "progress.json"
+    sys_pct = None
+    render_pct = None
+    if cfg_path.exists():
+        try:
+            cfg = _json.loads(cfg_path.read_text(encoding="utf-8"))
+            sys_pct = float(cfg.get("progress", {}).get("system"))
+            render_pct = float(cfg.get("progress", {}).get("render"))
+        except Exception:
+            pass
     p = []
     p.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}">')
     p.append("<defs><style>"
@@ -123,8 +135,8 @@ def main() -> None:
     # panel origins: grid starts at x=36/636; headers above
     left_ox, right_ox = 36, 636
     top_oy = 84
-    p.extend(draw_panel(LEFT, left_ox, top_oy, "PPU / system bring-up", "GUEST SYSTEM · BOOT PROJECT STATE 2"))
-    p.extend(draw_panel(RIGHT, right_ox, top_oy, "RSX / draw path", "RENDER · REAL LEGAL DRAW NOT VERIFIED"))
+    p.extend(draw_panel(LEFT, left_ox, top_oy, 'PPU / system bring-up', 'GUEST SYSTEM BOOT PROJECT STATE 2', sys_pct))
+    p.extend(draw_panel(RIGHT, right_ox, top_oy, 'RSX / draw path', 'RENDER REAL LEGAL DRAW NOT VERIFIED', render_pct))
 
     # vertical separator
     p.append(f'<line x1="{W//2}" y1="10" x2="{W//2}" y2="{H-30}" stroke="{EDGE}" stroke-width="1"/>')

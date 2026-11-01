@@ -5,7 +5,7 @@
 <text x="30" y="67" class="head">PPU / system bring-up</text>
 <text x="30" y="67" class="head" dx="188.6" fill="#22c55e">: 72.4%</text>
 <text x="30" y="67" class="head" dx="256.8" fill="#8b8f93">(811/1120)</text>
-<text x="30" y="79" class="kicker">GUEST SYSTEM · MEASURED 2026-10-31 LATE</text>
+<text x="30" y="79" class="kicker">GUEST SYSTEM BOOT PROJECT STATE 2</text>
 <rect x="34" y="82" width="143" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="36" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="46" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
@@ -147,8 +147,8 @@
 <rect x="146" y="174" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="156" y="174" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="166" y="174" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
-<text x="39" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">BOOT</text>
-<text x="39" y="94" class="blk">BOOT</text>
+<text x="39" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">BOOT PATH</text>
+<text x="39" y="94" class="blk">BOOT PATH</text>
 <rect x="174" y="82" width="143" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="176" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="186" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
@@ -1154,7 +1154,7 @@
 <text x="630" y="67" class="head">RSX / draw path</text>
 <text x="630" y="67" class="head" dx="137.0" fill="#22c55e">: 32.3%</text>
 <text x="630" y="67" class="head" dx="205.2" fill="#8b8f93">(362/1120)</text>
-<text x="630" y="79" class="kicker">RENDER · MEASURED 2026-10-31 LATE</text>
+<text x="630" y="79" class="kicker">RENDER REAL LEGAL DRAW NOT VERIFIED</text>
 <rect x="634" y="82" width="123" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="636" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="646" y="84" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
@@ -1565,8 +1565,8 @@
 <rect x="1006" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="1016" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="1026" y="174" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
-<text x="959" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">DRAW 1</text>
-<text x="959" y="94" class="blk">DRAW 1</text>
+<text x="959" y="94" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">IMMEDIATE</text>
+<text x="959" y="94" class="blk">IMMEDIATE</text>
 <rect x="634" y="182" width="143" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="636" y="184" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
 <rect x="646" y="184" width="9" height="9" fill="#22c55e" stroke="#0b3b1e" stroke-width="0.4"/>
@@ -1851,8 +1851,8 @@
 <rect x="886" y="274" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="896" y="274" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="906" y="274" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
-<text x="779" y="194" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">TEXTURES</text>
-<text x="779" y="194" class="blk">TEXTURES</text>
+<text x="779" y="194" class="blk" stroke="#000" stroke-width="2.2" paint-order="stroke">GPB TEXTURES</text>
+<text x="779" y="194" class="blk">GPB TEXTURES</text>
 <rect x="914" y="182" width="123" height="103" fill="none" stroke="#000" stroke-width="2"/>
 <rect x="916" y="184" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
 <rect x="926" y="184" width="9" height="9" fill="#151515" stroke="#2a2a2a" stroke-width="0.4"/>
@@ -2312,5 +2312,5 @@
 <text x="124" y="420" class="foot">partial / active</text>
 <rect x="230" y="413" width="8" height="8" fill="#151515" stroke="#2a2a2a" stroke-width="0.5"/>
 <text x="244" y="420" class="foot">not started</text>
-<text x="1164" y="420" text-anchor="end" class="foot">GT6PP · checklist cells, not code coverage · diagnostic overlay only; real game draw still black</text>
+<text x="1164" y="420" text-anchor="end" class="foot">VERIFIED: UI scripts · boot.adc read · 5 immediate draws | PENDING: K/IE → K/WD → GPB texture → legal frame</text>
 </svg>
