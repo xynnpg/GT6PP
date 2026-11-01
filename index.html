@@ -277,7 +277,7 @@
     // Pull live progress from the single source of truth: progress.json in the main repo.
     (async function () {
       try {
-        const r = await fetch('https://raw.githubusercontent.com/xynnpg/GT6PP/refs/heads/main/progress.json', { cache: 'no-store' });
+        const r = await fetch('https://raw.githubusercontent.com/xynnpg/GT6PP/main/progress.json', { cache: 'no-store' });
         if (!r.ok) return;
         const d = await r.json();
         const sys = d?.progress?.system;
