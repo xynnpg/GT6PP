@@ -111,6 +111,47 @@ def add_script_hooks(root: Path) -> int:
     return changed
 
 
+def add_file_device_guards(root: Path) -> int:
+    path = root / "ppu_recomp_022.cpp"
+    if not path.exists():
+        return 0
+    s = path.read_text(encoding="latin-1")
+    changed = 0
+    inc = '#include "ppu_recomp.h"\n'
+    decl = 'extern "C" int gt6_guest_file_vtable_valid(uint32_t object_ea);\n'
+    if inc in s and decl not in s:
+        s = s.replace(inc, inc + decl, 1)
+        changed += 1
+    guard = (
+        "        if (!gt6_guest_file_vtable_valid((uint32_t)ctx->gpr[3])) {\n"
+        "            ctx->gpr[3] = 0;\n"
+        "            return;\n"
+        "        }\n"
+    )
+    for name in ("func_009F3EB0", "func_009F3F2C",
+                 "func_009F7FF0", "func_009F8534"):
+        key = f"void {name}(ppu_context* ctx) {{\n    PPU_MM_SNAP\n"
+        if key in s and guard not in s[s.find(key):s.find(key) + len(key) + len(guard) + 32]:
+            s = s.replace(key, key + guard, 1)
+            changed += 1
+    if changed:
+        path.write_text(s, encoding="latin-1")
+    return changed
+
+
+def add_package_null_guard(root: Path) -> int:
+    path = root / "ppu_recomp_013.cpp"
+    if not path.exists():
+        return 0
+    s = path.read_text(encoding="latin-1")
+    old = "        if ((!((ctx->cr >> 1) & 1))) goto loc_005F81B0;"
+    new = "        if (((ctx->cr >> 1) & 1)) goto loc_005F81B0;"
+    if old not in s:
+        return 0
+    path.write_text(s.replace(old, new, 1), encoding="latin-1")
+    return 1
+
+
 # Boot/presents probes.  The menu worker (0x6CD8F8 -> 0xA11F20 -> entry
 # 0x14E0088 -> 0xA122D4) is alive for the whole measured run, so the missing
 # event is the engine update that consumes the project request queued by
@@ -171,6 +212,46 @@ def add_boot_presents_hooks(root: Path) -> int:
         if file_changed:
             path.write_text(s, encoding="latin-1")
             changed += 1
+    return changed
+
+
+def add_menu_project_pump(root: Path) -> int:
+    """Pump the registered menu processEventLoop callback from the worker.
+
+    MGOM.start() only queues manager+0x48/+0x50.  The real consumer is the
+    game-object-loop callback 0x568658 (OPD 0x14BF800) registered by the
+    cursor loader 0x56B948 via 0xA14824.  The native port never runs the
+    pdiext game-object update loop, so the menu worker's idle loop
+    (func_00A12170) pumps it with the manager captured at 0x568C94.
+    See docs/analysis/boot-project-handoff-fix.md.
+    """
+    path = root / "ppu_recomp_023.cpp"
+    if not path.exists():
+        print("warning: ppu_recomp_023.cpp not found; menu pump skipped",
+              file=sys.stderr)
+        return 0
+    s = path.read_text(encoding="latin-1")
+    changed = 0
+
+    inc = '#include "ppu_recomp.h"\n'
+    decl = 'extern "C" void gt6_menu_project_tick(ppu_context* ctx, uint32_t worker_arg);\n'
+    if inc in s and decl not in s:
+        s = s.replace(inc, inc + decl, 1)
+        changed += 1
+
+    label = "loc_00A121AC:\n"
+    call = "        gt6_menu_project_tick(ctx, (uint32_t)ctx->gpr[25]);\n"
+    if call in s:
+        pass
+    elif s.count(label) == 1:
+        s = s.replace(label, label + call, 1)
+        changed += 1
+    else:
+        print("warning: func_00A12170 loop label not found exactly once",
+              file=sys.stderr)
+
+    if changed:
+        path.write_text(s, encoding="latin-1")
     return changed
 
 
@@ -279,12 +360,18 @@ def main(argv: list[str]) -> int:
     root = Path(argv[1])
     guards = add_setjmp_guards(root)
     hooks = add_script_hooks(root)
+    device_guards = add_file_device_guards(root)
+    package_guard = add_package_null_guard(root)
     boot_hooks = add_boot_presents_hooks(root)
+    pump = add_menu_project_pump(root)
     host_open = add_host_open_wrapper(root)
     adch = patch_adch_switch(root)
     filedev_changes = patch_filedevice_flush(root)
     print(f"post-lift: setjmp guards added {guards}; script hooks changed {hooks}; "
           f"boot/presents hooks changed {boot_hooks}; "
+          f"menu pump changes {pump}; "
+          f"file-device guards {device_guards}; "
+          f"package null guards {package_guard}; "
           f"host-open wrappers {host_open}; "
           f"ADCH switch changes {adch}; FileDeviceHost changes {filedev_changes}")
     return 0

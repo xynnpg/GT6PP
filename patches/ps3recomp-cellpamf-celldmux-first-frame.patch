@@ -1,0 +1,3408 @@
+diff --git a/third_party/ps3recomp/libs/codec/cellPamf.h b/third_party/ps3recomp/libs/codec/cellPamf.h
+--- a/third_party/ps3recomp/libs/codec/cellPamf.h
++++ b/third_party/ps3recomp/libs/codec/cellPamf.h
+@@ -1,9 +1,22 @@
+ /*
+  * ps3recomp - cellPamf HLE
+  *
+- * PAMF (PlayStation AV Media File) container parser. PAMF files contain
+- * multiplexed H.264/MPEG2 video and AAC/ATRAC3+ audio streams used
+- * for PS3 game cutscenes and FMVs.
++ * PAMF (PlayStation AV Media File) container reader.  The file is a
++ * big-endian, sector-based container:
++ *
++ *   0x00  "PAMF"      0x04  "0040"/"0041"
++ *   0x08  header_size (2048-byte sectors)
++ *   0x0C  data_size   (2048-byte sectors)
++ *   0x50  PamfSequenceInfo
++ *   0x70  PamfGroupingPeriod
++ *   0x82  PamfGroup
++ *   0x88  PamfStreamHeader[stream_num]   (48 bytes each)
++ *
++ * Entry-point tables live in the header at each stream's ep_offset and
++ * consist of 12-byte big-endian PamfEpHeader records.  The data area is a
++ * sequence of 2048-byte MPEG-2 program-stream packs.
++ *
++ * celldmux consumes the packs; this module only describes the container.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_PAMF_H
+@@ -17,125 +30,207 @@
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+- * Error codes
+- * -----------------------------------------------------------------------*/
+-#define CELL_PAMF_ERROR_INVALID_ARG          0x80610301
+-#define CELL_PAMF_ERROR_INVALID_HEADER       0x80610302
+-#define CELL_PAMF_ERROR_STREAM_NOT_FOUND     0x80610303
+-#define CELL_PAMF_ERROR_EP_NOT_FOUND         0x80610304
+-#define CELL_PAMF_ERROR_NOT_AVAILABLE        0x80610305
+-
+-/* ---------------------------------------------------------------------------
+- * Stream types
+- * -----------------------------------------------------------------------*/
+-#define CELL_PAMF_STREAM_TYPE_AVC            0   /* H.264/AVC video */
+-#define CELL_PAMF_STREAM_TYPE_M2V            1   /* MPEG-2 video */
+-#define CELL_PAMF_STREAM_TYPE_ATRAC3PLUS     2   /* ATRAC3plus audio */
+-#define CELL_PAMF_STREAM_TYPE_PAMF_LPCM      3   /* LPCM audio */
+-#define CELL_PAMF_STREAM_TYPE_AC3            4   /* AC3 audio */
+-#define CELL_PAMF_STREAM_TYPE_USER_DATA      5   /* User data */
+-
+-/* Codec type constants */
+-#define CELL_PAMF_CODEC_TYPE_AVC             0x1B
+-#define CELL_PAMF_CODEC_TYPE_M2V             0x02
+-#define CELL_PAMF_CODEC_TYPE_ATRAC3PLUS      0xDC
+-#define CELL_PAMF_CODEC_TYPE_LPCM            0x80
+-#define CELL_PAMF_CODEC_TYPE_AC3             0x81
+-
+-/* ---------------------------------------------------------------------------
+- * PAMF header magic
+- * -----------------------------------------------------------------------*/
+-#define CELL_PAMF_MAGIC         0x50414D46   /* "PAMF" */
+-#define CELL_PAMF_VERSION       0x00040100   /* v4.1.0 */
+-
+-/* ---------------------------------------------------------------------------
+- * Types
+- * -----------------------------------------------------------------------*/
+-
+-typedef struct CellPamfReader {
+-    void* pamfAddr;       /* base address of PAMF data */
+-    u32   pamfSize;       /* total size */
+-    u32   dataOffset;     /* offset to mux data */
+-    u32   dataSize;       /* mux data size */
+-    u32   streamTableOffset; /* offset to stream descriptor table */
+-    u8    numStreams;      /* number of streams */
+-    u8    currentStream;  /* current stream index */
+-    u8    reserved[2];
+-    u32   currentEP;      /* current entry point */
+-} CellPamfReader;
+-
++ * Error codes (0x806105xx, not the invented 0x806103xx)
++ * -----------------------------------------------------------------------*/
++#define CELL_PAMF_ERROR_STREAM_NOT_FOUND    0x80610501
++#define CELL_PAMF_ERROR_INVALID_PAMF        0x80610502
++#define CELL_PAMF_ERROR_INVALID_ARG         0x80610503
++#define CELL_PAMF_ERROR_UNKNOWN_TYPE        0x80610504
++#define CELL_PAMF_ERROR_UNSUPPORTED_VERSION 0x80610505
++#define CELL_PAMF_ERROR_UNKNOWN_STREAM      0x80610506
++#define CELL_PAMF_ERROR_EP_NOT_FOUND        0x80610507
++#define CELL_PAMF_ERROR_NOT_AVAILABLE       0x80610508
++
++/* ReaderInitialize attribute flags */
++#define CELL_PAMF_ATTRIBUTE_VERIFY_ON       1
++#define CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER  2
++
++/* ---------------------------------------------------------------------------
++ * Stream types (SDK values; the on-disc coding types are 0x1B/0xDC/...)
++ * -----------------------------------------------------------------------*/
++#define CELL_PAMF_STREAM_TYPE_AVC             0
++#define CELL_PAMF_STREAM_TYPE_M2V             1
++#define CELL_PAMF_STREAM_TYPE_ATRAC3PLUS      2
++#define CELL_PAMF_STREAM_TYPE_PAMF_LPCM       3
++#define CELL_PAMF_STREAM_TYPE_AC3             4
++#define CELL_PAMF_STREAM_TYPE_USER_DATA       5
++#define CELL_PAMF_STREAM_TYPE_PSMF_AVC        6
++#define CELL_PAMF_STREAM_TYPE_PSMF_ATRAC3PLUS 7
++#define CELL_PAMF_STREAM_TYPE_PSMF_LPCM       8
++#define CELL_PAMF_STREAM_TYPE_PSMF_USER_DATA  9
++#define CELL_PAMF_STREAM_TYPE_VIDEO           20
++#define CELL_PAMF_STREAM_TYPE_AUDIO           21
++#define CELL_PAMF_STREAM_TYPE_UNK             22
++
++/* On-disc stream_coding_type values */
++#define CELL_PAMF_CODING_M2V        0x02
++#define CELL_PAMF_CODING_AVC        0x1B
++#define CELL_PAMF_CODING_LPCM       0x80
++#define CELL_PAMF_CODING_AC3        0x81
++#define CELL_PAMF_CODING_ATRAC3PLUS 0xDC
++#define CELL_PAMF_CODING_USER_DATA  0xDD
++#define CELL_PAMF_CODING_PSMF       0xFF
++
++#define CELL_PAMF_MAGIC   0x50414D46u   /* "PAMF" */
++
++/* ---------------------------------------------------------------------------
++ * Guest ABI structures.  These are descriptions of the guest layout; the
++ * implementation writes them field by field through vm_write*.
++ * -----------------------------------------------------------------------*/
++
++typedef struct CellCodecTimeStamp {
++    u32 upper;
++    u32 lower;
++} CellCodecTimeStamp;
++
++#ifndef PS3RECOMP_CODEC_ES_FILTER_ID_DEFINED
++#define PS3RECOMP_CODEC_ES_FILTER_ID_DEFINED
++typedef struct CellCodecEsFilterId {
++    u32 filterIdMajor;
++    u32 filterIdMinor;
++    u32 supplementalInfo1;
++    u32 supplementalInfo2;
++} CellCodecEsFilterId;
++#endif
++
++/* Entry point, unpacked form.  indexN/nThRefPictureOffset are already
++ * de-swizzled; pts is split into two words exactly as the guest stores it. */
++typedef struct CellPamfEp {
++    u32 indexN;
++    u32 nThRefPictureOffset;
++    CellCodecTimeStamp pts;
++    u64 rpnOffset;
++} CellPamfEp;
++
++/* 16 bytes in guest memory: isPamf at +0, index at +4, num at +8,
++ * pCur (guest EA of a packed PamfEpHeader) at +0xC. */
++typedef struct CellPamfEpIterator {
++    u8  isPamf;
++    u8  reserved[3];
++    u32 index;
++    u32 num;
++    u32 pCur;
++} CellPamfEpIterator;
++
++/* 0x20 bytes.  This is the real field order, not the invented one the old
++ * HLE used: profile/level, three flags/rates, aspect, SAR, sizes, crops,
++ * then video signal and entropy fields. */
+ typedef struct CellPamfAvcInfo {
+-    u8   profileIdc;
+-    u8   levelIdc;
+-    u16  horizontalSize;
+-    u16  verticalSize;
+-    u8   frameCropLeftOffset;
+-    u8   frameCropRightOffset;
+-    u8   frameCropTopOffset;
+-    u8   frameCropBottomOffset;
+-    u8   frameMbsOnlyFlag;
+-    u8   videoSignalInfoFlag;
+-    u8   frameRateCode;
+-    u8   aspectRatioIdc;
+-    u16  sarWidth;
+-    u16  sarHeight;
++    u8  profileIdc;
++    u8  levelIdc;
++    u8  frameMbsOnlyFlag;
++    u8  videoSignalInfoFlag;
++    u8  frameRateInfo;
++    u8  aspectRatioIdc;
++    u16 sarWidth;
++    u16 sarHeight;
++    u16 horizontalSize;
++    u16 verticalSize;
++    u16 frameCropLeftOffset;
++    u16 frameCropRightOffset;
++    u16 frameCropTopOffset;
++    u16 frameCropBottomOffset;
++    u8  videoFormat;
++    u8  videoFullRangeFlag;
++    u8  colourPrimaries;
++    u8  transferCharacteristics;
++    u8  matrixCoefficients;
++    u8  entropyCodingModeFlag;
++    u8  deblockingFilterFlag;
++    u8  minNumSlicePerPictureIdc;
++    u8  nfwIdc;
++    u8  maxMeanBitrate;
+ } CellPamfAvcInfo;
++
++typedef struct CellPamfM2vInfo {
++    u8  profileAndLevelIndication;
++    u8  progressiveSequence;
++    u8  videoSignalInfoFlag;
++    u8  frameRateInfo;
++    u8  aspectRatioIdc;
++    u16 sarWidth;
++    u16 sarHeight;
++    u16 horizontalSize;
++    u16 verticalSize;
++    u16 horizontalSizeValue;
++    u16 verticalSizeValue;
++    u8  videoFormat;
++    u8  videoFullRangeFlag;
++    u8  colourPrimaries;
++    u8  transferCharacteristics;
++    u8  matrixCoefficients;
++} CellPamfM2vInfo;
+ 
+ typedef struct CellPamfAtrac3plusInfo {
+     u32 samplingFrequency;
+     u8  numberOfChannels;
++    u8  reserved[3];
+ } CellPamfAtrac3plusInfo;
++
++typedef struct CellPamfAc3Info {
++    u32 samplingFrequency;
++    u8  numberOfChannels;
++    u8  reserved[3];
++} CellPamfAc3Info;
+ 
+ typedef struct CellPamfLpcmInfo {
+     u32 samplingFrequency;
+     u8  numberOfChannels;
+-    u8  bitsPerSample;
++    u16 bitsPerSample;
+ } CellPamfLpcmInfo;
+ 
+-typedef struct CellPamfAc3Info {
+-    u32 samplingFrequency;
+-    u8  numberOfChannels;
+-} CellPamfAc3Info;
+-
+-typedef struct CellPamfEp {
+-    u32 pts;              /* presentation timestamp (90kHz) */
+-    u32 rpnOffset;        /* byte offset from data start */
+-} CellPamfEp;
+-
+-typedef struct CellPamfStreamInfo {
+-    u8  streamType;
+-    u8  streamIndex;
+-    u8  streamId;
+-    u8  reserved;
+-} CellPamfStreamInfo;
+-
+-/* ---------------------------------------------------------------------------
+- * Functions
+- * -----------------------------------------------------------------------*/
+-
+-/* Reader lifecycle */
+-s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
+-                              u32 pamfSize, u32 attribute);
+-s32 cellPamfReaderGetPresentationStartTime(CellPamfReader* reader, u64* startTime);
+-s32 cellPamfReaderGetPresentationEndTime(CellPamfReader* reader, u64* endTime);
+-u32 cellPamfReaderGetMuxRateBound(CellPamfReader* reader);
+-
+-/* Stream queries */
+-s32 cellPamfReaderGetNumberOfStreams(CellPamfReader* reader);
+-s32 cellPamfReaderGetNumberOfSpecificStreams(CellPamfReader* reader, u8 streamType);
+-s32 cellPamfReaderSetStreamWithType(CellPamfReader* reader, u8 streamType, u32 streamIndex);
+-s32 cellPamfReaderSetStreamWithTypeAndChannel(CellPamfReader* reader, u8 streamType, u32 channel);
+-s32 cellPamfReaderSetStreamWithIndex(CellPamfReader* reader, u32 streamIndex);
+-s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize);
+-s32 cellPamfReaderGetStreamIndex(CellPamfReader* reader);
+-
+-/* Stream type queries */
+-s32 cellPamfStreamTypeToEsFilterId(u8 streamType, u8 streamIndex,
+-                                     void* esFilterId);
+-
+-/* Entry point navigation */
+-s32 cellPamfReaderGetNumberOfEp(CellPamfReader* reader, s32* numEp);
+-s32 cellPamfReaderGetEp(CellPamfReader* reader, u32 epIndex, CellPamfEp* ep);
++/* Opaque to the guest.  The HLE keys its host state on the guest EA, so the
++ * guest's 128-byte CellPamfReader never holds a host pointer. */
++typedef struct CellPamfReader CellPamfReader;
++
++/* ---------------------------------------------------------------------------
++ * Functions.  Names are the SDK names: gen_hle_nids.py derives the real NID
++ * from each name, so none of these are hand-coded.
++ * -----------------------------------------------------------------------*/
++
++s32 cellPamfGetHeaderSize(const void* pAddr, u64 fileSize, u64* pSize);
++s32 cellPamfGetHeaderSize2(const void* pAddr, u64 fileSize, u32 attribute,
++                           u64* pSize);
++s32 cellPamfGetStreamOffsetAndSize(const void* pAddr, u64 fileSize,
++                                   u64* pOffset, u64* pSize);
++s32 cellPamfVerify(const void* pAddr, u64 fileSize);
++
++s32 cellPamfReaderInitialize(CellPamfReader* pSelf, const void* pAddr,
++                             u64 fileSize, u32 attribute);
++s32 cellPamfReaderGetPresentationStartTime(CellPamfReader* pSelf,
++                                           CellCodecTimeStamp* pTimeStamp);
++s32 cellPamfReaderGetPresentationEndTime(CellPamfReader* pSelf,
++                                         CellCodecTimeStamp* pTimeStamp);
++u32 cellPamfReaderGetMuxRateBound(CellPamfReader* pSelf);
++
++s32 cellPamfReaderGetNumberOfStreams(CellPamfReader* pSelf);
++s32 cellPamfReaderGetNumberOfSpecificStreams(CellPamfReader* pSelf,
++                                             u8 streamType);
++s32 cellPamfReaderSetStreamWithIndex(CellPamfReader* pSelf, u8 streamIndex);
++s32 cellPamfReaderSetStreamWithTypeAndIndex(CellPamfReader* pSelf,
++                                            u8 streamType, u8 streamIndex);
++s32 cellPamfReaderSetStreamWithTypeAndChannel(CellPamfReader* pSelf,
++                                              u8 streamType, u8 ch);
++s32 cellPamfReaderSetStreamWithType(CellPamfReader* pSelf, u8 streamType,
++                                    u32 streamIndex);
++s32 cellPamfReaderGetStreamIndex(CellPamfReader* pSelf);
++s32 cellPamfReaderGetStreamTypeAndChannel(CellPamfReader* pSelf, u8* pType,
++                                          u8* pCh);
++s32 cellPamfReaderGetEsFilterId(CellPamfReader* pSelf, void* pEsFilterId);
++s32 cellPamfReaderGetStreamInfo(CellPamfReader* pSelf, void* pInfo, u32 size);
++s32 cellPamfStreamTypeToEsFilterId(u8 type, u8 ch, void* pEsFilterId);
++
++u32 cellPamfReaderGetNumberOfEp(CellPamfReader* pSelf);
++s32 cellPamfReaderGetEp(CellPamfReader* pSelf, u32 epIndex, CellPamfEp* pEp);
++s32 cellPamfReaderGetEpWithIndex(CellPamfReader* pSelf, u32 epIndex,
++                                 CellPamfEp* pEp);
++s32 cellPamfReaderGetEpIteratorWithIndex(CellPamfReader* pSelf, u32 epIndex,
++                                         CellPamfEpIterator* pIt);
++s32 cellPamfReaderGetEpIteratorWithTimeStamp(CellPamfReader* pSelf,
++                                             const CellCodecTimeStamp* pTimeStamp,
++                                             CellPamfEpIterator* pIt);
++s32 cellPamfEpIteratorGetEp(CellPamfEpIterator* pIt, CellPamfEp* pEp);
++s32 cellPamfEpIteratorMove(CellPamfEpIterator* pIt, s32 steps, CellPamfEp* pEp);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/third_party/ps3recomp/libs/codec/cellPamf.c b/third_party/ps3recomp/libs/codec/cellPamf.c
+--- a/third_party/ps3recomp/libs/codec/cellPamf.c
++++ b/third_party/ps3recomp/libs/codec/cellPamf.c
+@@ -1,445 +1,750 @@
+ /*
+- * ps3recomp - cellPamf HLE implementation
++ * ps3recomp - cellPamf HLE implementation (PAMF 0040/0041)
+  *
+- * Parses PAMF container headers to extract stream information.
+- * The actual PAMF header format is parsed to provide correct stream
+- * counts and codec parameters to cellDmux/cellVdec/cellAdec.
++ * Parses the real PAMF container layout and exposes it through the SDK
++ * cellPamf entry points.  No decryption and no game data live here: the
++ * movie-layer Salsa20 stream is decrypted by the guest before cellPamf
++ * sees the buffer.
++ *
++ * Layout facts used below (all big-endian, header offsets are file offsets):
++ *
++ *   0x00 "PAMF"   0x04 "0040"/"0041"
++ *   0x08 header_size (x2048)  0x0C data_size (x2048)
++ *   0x50 PamfSequenceInfo: size +0x00, start_pts_high +0x06,
++ *        start_pts_low +0x08, end_pts_high +0x0C, end_pts_low +0x0E,
++ *        mux_rate_bound +0x12, std_delay_bound +0x16,
++ *        total_stream_num +0x1A, grouping_period_num +0x1F
++ *   0x70 PamfGroupingPeriod: size +0x00, group_num +0x11
++ *   0x82 PamfGroup: size +0x00, stream_num +0x05, streams +0x06
++ *   0x88 PamfStreamHeader[48]: coding +0, stream_id +4, private_id +5,
++ *        p_std_buffer +6, ep_offset +8, ep_num +0x0C, specific +0x10..+0x2F
++ *   entry point: 12 bytes, value0/pts_high/pts_low/rpnOffset
+  */
+ 
+ #include "cellPamf.h"
+-#include "../../runtime/ppu/ppu_memory.h"   /* GUEST_PTR, vm_write*: guest EA -> host pointer */
++#include "../../runtime/ppu/ppu_memory.h"
+ #include <stdio.h>
+ #include <string.h>
+ 
+-/* ---------------------------------------------------------------------------
+- * PAMF file header layout (big-endian on disc)
+- *
+- * Offset  Size  Description
+- * 0x00    4     Magic "PAMF"
+- * 0x04    4     Version (typically 0x00040100)
+- * 0x08    4     Data offset (header size / start of mux data)
+- * 0x0C    4     Data size
+- * 0x10    4     Stream descriptor table offset
+- * 0x14    2     Number of streams
+- * 0x18    4     Presentation start time (90kHz ticks)
+- * 0x1C    4     Presentation end time (90kHz ticks)
+- * 0x20    4     Mux rate (bytes/sec)
+- * 0x24    4     EP table offset
+- * 0x28    4     EP count
+- *
+- * We access these via raw byte offsets rather than a packed struct to
+- * avoid alignment/padding issues across compilers.
+- * -----------------------------------------------------------------------*/
+-
+-#define PAMF_OFF_MAGIC            0x00
+-#define PAMF_OFF_VERSION          0x04
+-#define PAMF_OFF_DATA_OFFSET      0x08
+-#define PAMF_OFF_DATA_SIZE        0x0C
+-#define PAMF_OFF_STREAM_TABLE     0x10
+-#define PAMF_OFF_NUM_STREAMS      0x14
+-#define PAMF_OFF_PRESENT_START    0x18
+-#define PAMF_OFF_PRESENT_END      0x1C
+-#define PAMF_OFF_MUX_RATE         0x20
+-#define PAMF_OFF_EP_OFFSET        0x24
+-#define PAMF_OFF_EP_COUNT         0x28
+-
+-/* Minimum valid header size (enough to read all fields above) */
+-#define PAMF_MIN_HEADER_SIZE      0x2C
+-
+-/* Stream descriptor size (fixed 24 bytes per descriptor) */
+-#define PAMF_STREAM_DESC_SIZE     24
+-
+-/* Raw stream type values in the PAMF file (different from SDK constants!) */
+-#define PAMF_RAW_TYPE_AVC         1
+-#define PAMF_RAW_TYPE_M2V         2
+-#define PAMF_RAW_TYPE_ATRAC3PLUS  3
+-#define PAMF_RAW_TYPE_AC3         4
+-#define PAMF_RAW_TYPE_LPCM        5
+-#define PAMF_RAW_TYPE_USERDATA    6
+-
+-/* ---------------------------------------------------------------------------
+- * Endian helpers (PAMF is big-endian)
+- * -----------------------------------------------------------------------*/
+-static u32 be32(const void* p)
+-{
+-    const u8* b = (const u8*)p;
+-    return ((u32)b[0] << 24) | ((u32)b[1] << 16) | ((u32)b[2] << 8) | b[3];
+-}
+-
+-static u64 be64(const void* p)
+-{
+-    const u8* b = (const u8*)p;
+-    return ((u64)be32(b) << 32) | be32(b + 4);
+-}
+-
+-static u16 be16(const void* p)
+-{
+-    const u8* b = (const u8*)p;
+-    return ((u16)b[0] << 8) | b[1];
+-}
+-
+-/* ---------------------------------------------------------------------------
+- * Raw-type to SDK-type conversion
+- * -----------------------------------------------------------------------*/
+-static s32 raw_type_to_sdk(u8 rawType)
+-{
+-    switch (rawType) {
+-    case PAMF_RAW_TYPE_AVC:        return CELL_PAMF_STREAM_TYPE_AVC;
+-    case PAMF_RAW_TYPE_M2V:        return CELL_PAMF_STREAM_TYPE_M2V;
+-    case PAMF_RAW_TYPE_ATRAC3PLUS: return CELL_PAMF_STREAM_TYPE_ATRAC3PLUS;
+-    case PAMF_RAW_TYPE_AC3:        return CELL_PAMF_STREAM_TYPE_AC3;
+-    case PAMF_RAW_TYPE_LPCM:       return CELL_PAMF_STREAM_TYPE_PAMF_LPCM;
+-    case PAMF_RAW_TYPE_USERDATA:   return CELL_PAMF_STREAM_TYPE_USER_DATA;
+-    default:                       return -1;
+-    }
+-}
+-
+-/* ---------------------------------------------------------------------------
+- * Reader state lives HOST-side, keyed by the guest EA.
+- *
+- * The title allocates a CellPamfReader and passes its address in. Our
+- * CellPamfReader is a HOST-layout struct -- an 8-byte void* first member, 32
+- * bytes total -- while the guest's is 28 bytes with a 4-byte pointer. So we
+- * cannot simply translate the pointer and write through it: that stores four
+- * bytes past the end of the caller's struct, and the pamfAddr field would hold
+- * a 64-bit host pointer the guest could never use. Key off the EA instead and
+- * never write the guest's copy; the title treats the reader as opaque.
+- *
+- * ponytail: linear scan over 8 slots. A title juggling more PAMF readers than
+- * that wants a hash; nothing has needed even two.
+- * -----------------------------------------------------------------------*/
+-#define PAMF_MAX_READERS 8
+-static struct { u32 ea; int in_use; CellPamfReader r; } s_readers[PAMF_MAX_READERS];
+-
+-static CellPamfReader* pamf_host(CellPamfReader* guest_ea)
+-{
+-    u32 ea = (u32)(uintptr_t)guest_ea;
++#define PAMF_MAX_READERS 16
++#define PAMF_MAX_STREAMS 16
++
++typedef struct {
++    u8  coding;
++    u8  stream_id;
++    u8  private_id;
++    u16 p_std_buffer;
++    u32 ep_offset;
++    u32 ep_num;
++    u8  specific[32];
++} PamfStream;
++
++typedef struct {
++    int      in_use;
++    u32      guest_ea;          /* reader object, used as the host key */
++    const u8* base;             /* guest PAMF buffer, host view */
++    u32      file_size;
++    u32      header_size;
++    u32      data_size;
++    u32      attribute;
++    u16      version;           /* 40 or 41 */
++    u32      start_hi, start_lo;
++    u32      end_hi, end_lo;
++    u32      mux_rate;
++    u32      std_delay;
++    u32      stream_count;
++    PamfStream streams[PAMF_MAX_STREAMS];
++    u32      current;
++} PamfHost;
++
++static PamfHost s_pamf[PAMF_MAX_READERS];
++
++static u16 be16(const u8* p)
++{
++    return (u16)(((u16)p[0] << 8) | p[1]);
++}
++
++static u32 be32(const u8* p)
++{
++    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
++}
++
++static PamfHost* pamf_host(CellPamfReader* guest)
++{
++    u32 ea = (u32)(uintptr_t)guest;
+     if (!ea)
+         return NULL;
+     for (int i = 0; i < PAMF_MAX_READERS; i++)
+-        if (s_readers[i].in_use && s_readers[i].ea == ea)
+-            return &s_readers[i].r;
+-    for (int i = 0; i < PAMF_MAX_READERS; i++)
+-        if (!s_readers[i].in_use) {
+-            s_readers[i].in_use = 1;
+-            s_readers[i].ea = ea;
+-            memset(&s_readers[i].r, 0, sizeof(s_readers[i].r));
+-            return &s_readers[i].r;
++        if (s_pamf[i].in_use && s_pamf[i].guest_ea == ea)
++            return &s_pamf[i];
++    for (int i = 0; i < PAMF_MAX_READERS; i++) {
++        if (!s_pamf[i].in_use) {
++            memset(&s_pamf[i], 0, sizeof(s_pamf[i]));
++            s_pamf[i].in_use = 1;
++            s_pamf[i].guest_ea = ea;
++            return &s_pamf[i];
+         }
++    }
+     return NULL;
+ }
+ 
+-/* --------------------------------------------------------------------------- 
++static void pamf_reset(PamfHost* h)
++{
++    u32 ea = h->guest_ea;
++    memset(h, 0, sizeof(*h));
++    h->in_use = 1;
++    h->guest_ea = ea;
++}
++
++/* ---------------------------------------------------------------------------
++ * Header parser.  `strict` adds the bounds checks cellPamfVerify performs;
++ * ReaderInitialize also needs the parsed stream table.
++ * -----------------------------------------------------------------------*/
++static s32 pamf_parse(const u8* base, u32 file_size, u32 attribute,
++                      PamfHost* h, int strict)
++{
++    u32 header_size, data_size;
++    u32 seq_size, gp_size, grp_size;
++    u32 stream_num;
++
++    if (!base || file_size < 0x70)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    if (be32(base + 0x00) != CELL_PAMF_MAGIC)
++        return (s32)CELL_PAMF_ERROR_UNKNOWN_TYPE;
++
++    if (be32(base + 0x04) == 0x30303430u)        /* "0040" */
++        h->version = 40;
++    else if (be32(base + 0x04) == 0x30303431u)   /* "0041" */
++        h->version = 41;
++    else
++        return (s32)CELL_PAMF_ERROR_UNSUPPORTED_VERSION;
++
++    header_size = be32(base + 0x08) * 0x800u;
++    data_size   = be32(base + 0x0C) * 0x800u;
++    if (header_size == 0)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++    if (file_size && header_size + data_size != file_size)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    h->base = base;
++    h->file_size = file_size;
++    h->header_size = header_size;
++    h->data_size = data_size;
++    h->attribute = attribute;
++
++    /* Sequence info at 0x50. */
++    if (0x54u > header_size)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++    seq_size = be32(base + 0x50);
++    if (strict && (seq_size < 0x20u || 0x54u + seq_size > header_size))
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    h->start_hi = be16(base + 0x56);
++    h->start_lo = be32(base + 0x58);
++    h->end_hi   = be16(base + 0x5C);
++    h->end_lo   = be32(base + 0x5E);
++    h->mux_rate = be32(base + 0x62) & 0x003FFFFFu;
++    h->std_delay = be32(base + 0x66);
++
++    /* CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER: the caller may only have the
++     * sequence-info part mapped.  Everything cellPamfGetHeaderSize2 needs is
++     * already parsed; do not touch the group/stream/EP tables. */
++    if (attribute & CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER) {
++        h->stream_count = 0;
++        return CELL_OK;
++    }
++
++    /* Grouping period at 0x70, group at 0x82.  There is always exactly one
++     * of each in PAMF; tolerate the fields being absent in a minimum-header
++     * buffer, but never read past header_size. */
++    gp_size = (0x74u <= header_size) ? be32(base + 0x70) : 0;
++    if (strict && (gp_size < 0x10u || 0x74u + gp_size > header_size))
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    if (0x88u > header_size)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++    grp_size = be32(base + 0x82);
++    if (strict && (grp_size < 0x08u || 0x86u + grp_size > header_size))
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    stream_num = base[0x87];
++    if (stream_num > PAMF_MAX_STREAMS)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++    if (0x88u + stream_num * 48u > header_size)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    if (strict && be32(base + 0x6A) != stream_num)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    h->stream_count = stream_num;
++    for (u32 i = 0; i < stream_num; i++) {
++        const u8* sh = base + 0x88 + i * 48;
++        PamfStream* st = &h->streams[i];
++        memset(st, 0, sizeof(*st));
++        st->coding = sh[0];
++        st->stream_id = sh[4];
++        st->private_id = sh[5];
++        st->p_std_buffer = be16(sh + 6);
++        st->ep_offset = be32(sh + 8);
++        st->ep_num = be32(sh + 12);
++        memcpy(st->specific, sh + 16, 32);
++
++        if (st->ep_num) {
++            if (st->ep_offset < 0x88u ||
++                st->ep_offset + st->ep_num * 12u > header_size)
++                return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++            if (strict) {
++                u32 prev = 0;
++                for (u32 e = 0; e < st->ep_num; e++) {
++                    const u8* ep = base + st->ep_offset + e * 12;
++                    u32 rpn = be32(ep + 8);
++                    if (rpn < prev || (u64)rpn * 0x800ull > data_size)
++                        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++                    prev = rpn;
++                }
++            }
++        } else if (strict && st->ep_offset != 0) {
++            return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++        }
++    }
++
++    return CELL_OK;
++}
++
++static u32 pamf_min_header_size(const u8* base, u32 header_size)
++{
++    u32 seq_size;
++    if (!base || header_size < 0x54)
++        return 0;
++    seq_size = be32(base + 0x50);
++    if (0x54u + seq_size > header_size)
++        return 0;
++    return 0x54u + seq_size;
++}
++
++/* ---------------------------------------------------------------------------
++ * Container-level queries
++ * -----------------------------------------------------------------------*/
++
++s32 cellPamfGetStreamOffsetAndSize(const void* pAddr, u64 fileSize,
++                                   u64* pOffset, u64* pSize)
++{
++    const u8* base = (const u8*)GUEST_PTR(pAddr, const void*);
++    u32 fs = fileSize > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)fileSize;
++    PamfHost tmp;
++    s32 rc;
++
++    memset(&tmp, 0, sizeof(tmp));
++    rc = pamf_parse(base, fs, 0, &tmp, 1);
++    if (rc != CELL_OK)
++        return rc;
++
++    if (pOffset)
++        vm_write64((u32)(uintptr_t)pOffset, (u64)tmp.header_size);
++    if (pSize)
++        vm_write64((u32)(uintptr_t)pSize, (u64)tmp.data_size);
++    return CELL_OK;
++}
++
++s32 cellPamfGetHeaderSize(const void* pAddr, u64 fileSize, u64* pSize)
++{
++    return cellPamfGetStreamOffsetAndSize(pAddr, fileSize, pSize, NULL);
++}
++
++s32 cellPamfGetHeaderSize2(const void* pAddr, u64 fileSize, u32 attribute,
++                           u64* pSize)
++{
++    const u8* base = (const u8*)GUEST_PTR(pAddr, const void*);
++    u32 fs = fileSize > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)fileSize;
++    PamfHost tmp;
++    s32 rc;
++    u64 size;
++
++    memset(&tmp, 0, sizeof(tmp));
++    rc = pamf_parse(base, fs, attribute, &tmp, 1);
++    if (rc != CELL_OK)
++        return rc;
++
++    size = tmp.header_size;
++    if (attribute & CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER) {
++        u32 min_size = pamf_min_header_size(base, tmp.header_size);
++        if (!min_size || min_size > tmp.header_size)
++            return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++        size = min_size;
++    }
++
++    if (pSize)
++        vm_write64((u32)(uintptr_t)pSize, size);
++    return CELL_OK;
++}
++
++s32 cellPamfVerify(const void* pAddr, u64 fileSize)
++{
++    const u8* base = (const u8*)GUEST_PTR(pAddr, const void*);
++    u32 fs = fileSize > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)fileSize;
++    PamfHost tmp;
++
++    memset(&tmp, 0, sizeof(tmp));
++    return pamf_parse(base, fs, CELL_PAMF_ATTRIBUTE_VERIFY_ON, &tmp, 1);
++}
++
++/* ---------------------------------------------------------------------------
+  * Reader lifecycle
+  * -----------------------------------------------------------------------*/
+ 
+-s32 cellPamfReaderInitialize(CellPamfReader* reader, void* pamfAddr,
+-                              u32 pamfSize, u32 attribute)
+-{
+-    reader = pamf_host(reader);
+-    (void)attribute;
+-
+-    printf("[cellPamf] ReaderInitialize(addr=%p, size=%u)\n", pamfAddr, pamfSize);
+-
+-    if (!reader || !pamfAddr || pamfSize < PAMF_MIN_HEADER_SIZE)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    pamfAddr = GUEST_PTR(pamfAddr, void*);
+-    const u8* base = (const u8*)pamfAddr;
+-
+-    /* Verify magic */
+-    u32 magic = be32(base + PAMF_OFF_MAGIC);
+-    if (magic != CELL_PAMF_MAGIC) {
+-        printf("[cellPamf] Invalid PAMF magic: 0x%08X\n", magic);
+-        return (s32)CELL_PAMF_ERROR_INVALID_HEADER;
+-    }
+-
+-    reader->pamfAddr = pamfAddr;
+-    reader->pamfSize = pamfSize;
+-    reader->dataOffset = be32(base + PAMF_OFF_DATA_OFFSET);
+-    reader->dataSize = be32(base + PAMF_OFF_DATA_SIZE);
+-    reader->streamTableOffset = be32(base + PAMF_OFF_STREAM_TABLE);
+-    reader->numStreams = (u8)be16(base + PAMF_OFF_NUM_STREAMS);
+-    reader->currentStream = 0;
+-    reader->currentEP = 0;
+-
+-    u32 muxRate = be32(base + PAMF_OFF_MUX_RATE);
+-
+-    printf("[cellPamf] PAMF v%08X: %u streams, dataOffset=0x%X, dataSize=%u, "
+-           "streamTableOff=0x%X, muxRate=%u\n",
+-           be32(base + PAMF_OFF_VERSION),
+-           reader->numStreams, reader->dataOffset, reader->dataSize,
+-           reader->streamTableOffset, muxRate);
+-
+-    /* Log each stream descriptor */
+-    for (u32 i = 0; i < reader->numStreams; i++) {
+-        const u8* desc = base + reader->streamTableOffset + i * PAMF_STREAM_DESC_SIZE;
+-        u8 rawType = desc[0];
+-        u8 channel = desc[1];
+-        s32 sdkType = raw_type_to_sdk(rawType);
+-        printf("[cellPamf]   stream[%u]: rawType=%u (sdk=%d) channel=%u\n",
+-               i, rawType, sdkType, channel);
+-    }
+-
+-    return CELL_OK;
+-}
+-
+-s32 cellPamfReaderGetPresentationStartTime(CellPamfReader* reader, u64* startTime)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader || !startTime)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    vm_write64((u32)(uintptr_t)startTime, (u64)be32(base + PAMF_OFF_PRESENT_START));
+-    return CELL_OK;
+-}
+-
+-s32 cellPamfReaderGetPresentationEndTime(CellPamfReader* reader, u64* endTime)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader || !endTime)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    vm_write64((u32)(uintptr_t)endTime, (u64)be32(base + PAMF_OFF_PRESENT_END));
+-    return CELL_OK;
+-}
+-
+-u32 cellPamfReaderGetMuxRateBound(CellPamfReader* reader)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return 0;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    return be32(base + PAMF_OFF_MUX_RATE);
++s32 cellPamfReaderInitialize(CellPamfReader* pSelf, const void* pAddr,
++                             u64 fileSize, u32 attribute)
++{
++    u32 ea = (u32)(uintptr_t)pSelf;
++    const u8* base = (const u8*)GUEST_PTR(pAddr, const void*);
++    u32 fs = fileSize > 0xFFFFFFFFull ? 0xFFFFFFFFu : (u32)fileSize;
++    PamfHost* h;
++    s32 rc;
++
++    if (!ea || !base)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    h = pamf_host(pSelf);
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    pamf_reset(h);
++
++    rc = pamf_parse(base, fs, attribute, h, 0);
++    if (rc != CELL_OK) {
++        printf("[cellPamf] ReaderInitialize rejected: rc=0x%08X magic=%02X%02X%02X%02X\n",
++               (u32)rc, base[0], base[1], base[2], base[3]);
++        return rc;
++    }
++
++    /* The guest's CellPamfReader is 128 bytes and is opaque to us.  Write
++     * only scalars; never a host pointer. */
++    for (u32 o = 0; o < 0x80; o += 4)
++        vm_write32(ea + o, 0);
++    vm_write64(ea + 0x00, (u64)h->header_size);
++    vm_write64(ea + 0x08, (u64)h->data_size);
++    vm_write32(ea + 0x10, attribute);
++    vm_write16(ea + 0x14, 0);              /* isPsmf */
++    vm_write16(ea + 0x16, h->version);
++    vm_write32(ea + 0x18, h->stream_count ? 0u : 0xFFFFFFFFu);
++    vm_write32(ea + 0x1C, h->stream_count ? 0u : 0xFFFFFFFFu);
++    vm_write32(ea + 0x20, h->stream_count ? 0u : 0xFFFFFFFFu);
++    h->current = 0;
++
++    printf("[cellPamf] PAMF%u header=0x%X data=0x%X streams=%u "
++           "start=%u.%u end=%u.%u mux=%u\n",
++           (unsigned)h->version, h->header_size, h->data_size,
++           h->stream_count, h->start_hi, h->start_lo,
++           h->end_hi, h->end_lo, h->mux_rate);
++    for (u32 i = 0; i < h->stream_count; i++)
++        printf("[cellPamf]   stream[%u]: coding=0x%02X id=0x%02X priv=%u "
++               "ep_off=0x%X ep_num=%u\n",
++               i, h->streams[i].coding, h->streams[i].stream_id,
++               h->streams[i].private_id, h->streams[i].ep_offset,
++               h->streams[i].ep_num);
++
++    return CELL_OK;
++}
++
++s32 cellPamfReaderGetPresentationStartTime(CellPamfReader* pSelf,
++                                           CellCodecTimeStamp* pTimeStamp)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pTimeStamp;
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    vm_write32(ea + 0, h->start_hi);
++    vm_write32(ea + 4, h->start_lo);
++    return CELL_OK;
++}
++
++s32 cellPamfReaderGetPresentationEndTime(CellPamfReader* pSelf,
++                                         CellCodecTimeStamp* pTimeStamp)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pTimeStamp;
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    vm_write32(ea + 0, h->end_hi);
++    vm_write32(ea + 4, h->end_lo);
++    return CELL_OK;
++}
++
++u32 cellPamfReaderGetMuxRateBound(CellPamfReader* pSelf)
++{
++    PamfHost* h = pamf_host(pSelf);
++    return h ? h->mux_rate : 0;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+- * Stream queries
++ * Stream type mapping
+  * -----------------------------------------------------------------------*/
+ 
+-s32 cellPamfReaderGetNumberOfStreams(CellPamfReader* reader)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    return reader->numStreams;
+-}
+-
+-/* Get pointer to raw stream descriptor bytes by absolute index */
+-static const u8* get_stream_desc_raw(CellPamfReader* reader, u32 index)
+-{
+-    if (!reader || index >= reader->numStreams)
+-        return NULL;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    return base + reader->streamTableOffset + index * PAMF_STREAM_DESC_SIZE;
+-}
+-
+-/* Get SDK stream type for a given absolute stream index */
+-static s32 get_stream_sdk_type(CellPamfReader* reader, u32 index)
+-{
+-    const u8* desc = get_stream_desc_raw(reader, index);
+-    if (!desc) return -1;
+-    return raw_type_to_sdk(desc[0]);
+-}
+-
+-s32 cellPamfReaderGetNumberOfSpecificStreams(CellPamfReader* reader, u8 streamType)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
++static s32 pamf_coding_to_type(u8 coding, u8 stream_id, u8 private_id,
++                               u8* type, u8* ch)
++{
++    u8 t, c;
++
++    switch (coding) {
++    case CELL_PAMF_CODING_AVC:
++        t = CELL_PAMF_STREAM_TYPE_AVC;
++        c = stream_id & 0x0F;
++        break;
++    case CELL_PAMF_CODING_M2V:
++        t = CELL_PAMF_STREAM_TYPE_M2V;
++        c = stream_id & 0x0F;
++        break;
++    case CELL_PAMF_CODING_ATRAC3PLUS:
++        t = CELL_PAMF_STREAM_TYPE_ATRAC3PLUS;
++        c = private_id & 0x0F;
++        break;
++    case CELL_PAMF_CODING_LPCM:
++        t = CELL_PAMF_STREAM_TYPE_PAMF_LPCM;
++        c = private_id & 0x0F;
++        break;
++    case CELL_PAMF_CODING_AC3:
++        t = CELL_PAMF_STREAM_TYPE_AC3;
++        c = private_id & 0x0F;
++        break;
++    case CELL_PAMF_CODING_USER_DATA:
++        t = CELL_PAMF_STREAM_TYPE_USER_DATA;
++        c = private_id & 0x0F;
++        break;
++    default:
++        return (s32)CELL_PAMF_ERROR_UNKNOWN_STREAM;
++    }
++
++    if (type) *type = t;
++    if (ch) *ch = c;
++    return CELL_OK;
++}
++
++static s32 pamf_type_to_coding(u8 type, u8 ch, u8* coding, u8* stream_id,
++                               u8* private_id)
++{
++    switch (type) {
++    case CELL_PAMF_STREAM_TYPE_AVC:
++        *coding = CELL_PAMF_CODING_AVC; *stream_id = 0xE0 | (ch & 0x0F);
++        *private_id = 0; break;
++    case CELL_PAMF_STREAM_TYPE_M2V:
++        *coding = CELL_PAMF_CODING_M2V; *stream_id = 0xE0 | (ch & 0x0F);
++        *private_id = 0; break;
++    case CELL_PAMF_STREAM_TYPE_ATRAC3PLUS:
++        *coding = CELL_PAMF_CODING_ATRAC3PLUS; *stream_id = 0xBD;
++        *private_id = ch & 0x0F; break;
++    case CELL_PAMF_STREAM_TYPE_PAMF_LPCM:
++        *coding = CELL_PAMF_CODING_LPCM; *stream_id = 0xBD;
++        *private_id = 0x40 | (ch & 0x0F); break;
++    case CELL_PAMF_STREAM_TYPE_AC3:
++        *coding = CELL_PAMF_CODING_AC3; *stream_id = 0xBD;
++        *private_id = 0x30 | (ch & 0x0F); break;
++    case CELL_PAMF_STREAM_TYPE_USER_DATA:
++        *coding = CELL_PAMF_CODING_USER_DATA; *stream_id = 0xBD;
++        *private_id = 0x20 | (ch & 0x0F); break;
++    default:
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    }
++    return CELL_OK;
++}
++
++static int pamf_same_type(u8 type, u8 requested)
++{
++    switch (requested) {
++    case CELL_PAMF_STREAM_TYPE_VIDEO:
++        return type == CELL_PAMF_STREAM_TYPE_AVC || type == CELL_PAMF_STREAM_TYPE_M2V;
++    case CELL_PAMF_STREAM_TYPE_AUDIO:
++        return type == CELL_PAMF_STREAM_TYPE_ATRAC3PLUS ||
++               type == CELL_PAMF_STREAM_TYPE_AC3 ||
++               type == CELL_PAMF_STREAM_TYPE_PAMF_LPCM;
++    case CELL_PAMF_STREAM_TYPE_UNK:
++        return type == CELL_PAMF_STREAM_TYPE_PAMF_LPCM ||
++               type == CELL_PAMF_STREAM_TYPE_PSMF_ATRAC3PLUS;
++    default:
++        return type == requested;
++    }
++}
++
++static s32 pamf_current_type(PamfHost* h, u8* type, u8* ch)
++{
++    if (!h || h->current >= h->stream_count)
++        return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
++    return pamf_coding_to_type(h->streams[h->current].coding,
++                               h->streams[h->current].stream_id,
++                               h->streams[h->current].private_id, type, ch);
++}
++
++/* ---------------------------------------------------------------------------
++ * Stream selection
++ * -----------------------------------------------------------------------*/
++
++s32 cellPamfReaderGetNumberOfStreams(CellPamfReader* pSelf)
++{
++    PamfHost* h = pamf_host(pSelf);
++    return h ? (s32)h->stream_count : (s32)CELL_PAMF_ERROR_INVALID_ARG;
++}
++
++s32 cellPamfReaderGetNumberOfSpecificStreams(CellPamfReader* pSelf,
++                                             u8 streamType)
++{
++    PamfHost* h = pamf_host(pSelf);
+     s32 count = 0;
+-    for (u32 i = 0; i < reader->numStreams; i++) {
+-        if (get_stream_sdk_type(reader, i) == (s32)streamType)
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    for (u32 i = 0; i < h->stream_count; i++) {
++        u8 t;
++        if (pamf_coding_to_type(h->streams[i].coding, h->streams[i].stream_id,
++                                h->streams[i].private_id, &t, NULL) == CELL_OK &&
++            pamf_same_type(t, streamType))
+             count++;
+     }
+     return count;
+ }
+ 
+-s32 cellPamfReaderSetStreamWithType(CellPamfReader* reader, u8 streamType, u32 streamIndex)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
++s32 cellPamfReaderSetStreamWithIndex(CellPamfReader* pSelf, u8 streamIndex)
++{
++    PamfHost* h = pamf_host(pSelf);
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (streamIndex >= h->stream_count)
++        return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
++    h->current = streamIndex;
++    vm_write32(h->guest_ea + 0x20, streamIndex);
++    return CELL_OK;
++}
++
++s32 cellPamfReaderSetStreamWithTypeAndIndex(CellPamfReader* pSelf,
++                                            u8 streamType, u8 streamIndex)
++{
++    PamfHost* h = pamf_host(pSelf);
+     u32 found = 0;
+-    for (u32 i = 0; i < reader->numStreams; i++) {
+-        if (get_stream_sdk_type(reader, i) == (s32)streamType) {
+-            if (found == streamIndex) {
+-                reader->currentStream = (u8)i;
+-                return CELL_OK;
+-            }
+-            found++;
++
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    for (u32 i = 0; i < h->stream_count; i++) {
++        u8 t;
++        if (pamf_coding_to_type(h->streams[i].coding, h->streams[i].stream_id,
++                                h->streams[i].private_id, &t, NULL) != CELL_OK)
++            continue;
++        if (!pamf_same_type(t, streamType))
++            continue;
++        if (found == streamIndex) {
++            h->current = i;
++            vm_write32(h->guest_ea + 0x20, i);
++            /* The LLE implementation returns the absolute stream index. */
++            return (s32)i;
+         }
++        found++;
+     }
+     return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
+ }
+ 
+-s32 cellPamfReaderSetStreamWithTypeAndChannel(CellPamfReader* reader, u8 streamType, u32 channel)
+-{
+-    /* Forward the GUEST pointer untouched: cellPamfReaderSetStreamWithType
+-     * resolves it itself, and pamf_host keys on the guest EA -- handing it an
+-     * already-resolved host pointer would key a second, empty slot. */
+-    return cellPamfReaderSetStreamWithType(reader, streamType, channel);
+-}
+-
+-s32 cellPamfReaderSetStreamWithIndex(CellPamfReader* reader, u32 streamIndex)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    if (streamIndex >= reader->numStreams)
++s32 cellPamfReaderSetStreamWithTypeAndChannel(CellPamfReader* pSelf,
++                                              u8 streamType, u8 ch)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u8 coding, sid, priv;
++    s32 rc;
++
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    rc = pamf_type_to_coding(streamType, ch, &coding, &sid, &priv);
++    if (rc != CELL_OK)
++        return rc;
++
++    for (u32 i = 0; i < h->stream_count; i++) {
++        if (h->streams[i].coding == coding &&
++            h->streams[i].stream_id == sid &&
++            h->streams[i].private_id == priv) {
++            h->current = i;
++            vm_write32(h->guest_ea + 0x20, i);
++            return CELL_OK;
++        }
++    }
++    return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
++}
++
++s32 cellPamfReaderSetStreamWithType(CellPamfReader* pSelf, u8 streamType,
++                                    u32 streamIndex)
++{
++    return cellPamfReaderSetStreamWithTypeAndIndex(pSelf, streamType,
++                                                   (u8)streamIndex);
++}
++
++s32 cellPamfReaderGetStreamIndex(CellPamfReader* pSelf)
++{
++    PamfHost* h = pamf_host(pSelf);
++    return h ? (s32)h->current : (s32)CELL_PAMF_ERROR_INVALID_ARG;
++}
++
++s32 cellPamfReaderGetStreamTypeAndChannel(CellPamfReader* pSelf, u8* pType,
++                                          u8* pCh)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u8 t, c;
++    s32 rc;
++
++    if (!h)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    rc = pamf_current_type(h, &t, &c);
++    if (rc != CELL_OK)
++        return rc;
++    if (pType)
++        vm_write8((u32)(uintptr_t)pType, t);
++    if (pCh)
++        vm_write8((u32)(uintptr_t)pCh, c);
++    return CELL_OK;
++}
++
++s32 cellPamfReaderGetEsFilterId(CellPamfReader* pSelf, void* pEsFilterId)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pEsFilterId;
++    const PamfStream* s;
++
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (h->current >= h->stream_count)
+         return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
+-
+-    reader->currentStream = (u8)streamIndex;
++    s = &h->streams[h->current];
++    vm_write32(ea + 0x0, s->stream_id);
++    vm_write32(ea + 0x4, s->private_id);
++    vm_write32(ea + 0x8, s->coding == CELL_PAMF_CODING_AVC ? 1u : 0u);
++    vm_write32(ea + 0xC, 0);
++    return CELL_OK;
++}
++
++s32 cellPamfStreamTypeToEsFilterId(u8 type, u8 ch, void* pEsFilterId)
++{
++    u32 ea = (u32)(uintptr_t)pEsFilterId;
++    u8 coding, sid, priv;
++    s32 rc;
++
++    if (!ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    rc = pamf_type_to_coding(type, ch, &coding, &sid, &priv);
++    if (rc != CELL_OK)
++        return rc;
++    vm_write32(ea + 0x0, sid);
++    vm_write32(ea + 0x4, priv);
++    vm_write32(ea + 0x8, type == CELL_PAMF_STREAM_TYPE_AVC ? 1u : 0u);
++    vm_write32(ea + 0xC, 0);
+     return CELL_OK;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+- * Sample rate / channel lookup helpers for audio descriptors
++ * Stream info
+  * -----------------------------------------------------------------------*/
+-static u32 audio_sample_rate(u8 code)
+-{
+-    switch (code) {
+-    case 1: return 44100;
+-    case 2: return 48000;
+-    default: return 48000;
+-    }
+-}
+-
+-static u8 audio_channels(u8 code)
+-{
+-    switch (code) {
+-    case 1: return 1;
+-    case 2: return 2;
+-    case 6: return 6;
+-    case 8: return 8;
+-    default: return 2;
+-    }
+-}
+-
+-static u8 lpcm_bits(u8 code)
+-{
+-    switch (code) {
+-    case 1: return 16;
+-    case 2: return 24;
+-    default: return 16;
+-    }
+-}
+-
+-/* ---------------------------------------------------------------------------
+- * Stream info extraction — reads real codec parameters from descriptors
+- *
+- * Stream descriptor layout (24 bytes, big-endian):
+- *   Byte  0:    stream type (raw: 1=AVC, 2=M2V, 3=ATRAC3+, 4=AC3, 5=LPCM)
+- *   Byte  1:    channel index
+- *   For AVC (type 1):
+- *     Byte  2:  profileIdc (66=baseline, 77=main, 100=high)
+- *     Byte  3:  levelIdc
+- *     Byte  4:  frameMbsOnlyFlag (bit 7), videoSignalInfoFlag (bit 6)
+- *     Byte  5:  frameRateCode (upper nibble), aspectRatioIdc (lower nibble)
+- *     Bytes 6-7:   sarWidth  (be16)
+- *     Bytes 8-9:   sarHeight (be16)
+- *     Bytes 14-15:  horizontalSize (be16)
+- *     Bytes 16-17:  verticalSize   (be16)
+- *     Bytes 18-19:  frameCropLeft/Right
+- *     Bytes 20-21:  frameCropTop/Bottom
+- *   For ATRAC3+ (type 3) / AC3 (type 4):
+- *     Byte 10:  channel configuration
+- *     Byte 12:  sample rate code
+- *   For LPCM (type 5):
+- *     Byte 10:  channel configuration
+- *     Byte 11:  bits-per-sample code
+- *     Byte 12:  sample rate code
+- * -----------------------------------------------------------------------*/
+-
+-s32 cellPamfReaderGetStreamInfo(CellPamfReader* reader, void* info, u32 infoSize)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader || !info)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    info = GUEST_PTR(info, void*);
+-    /* ponytail: the CellPamf*Info structs below are filled host-endian.
+-     * Their u8 fields are already right; the u16/u32 ones (horizontalSize,
+-     * samplingFreq, ...) still need a swap if a title ever reads them. */
+-    const u8* desc = get_stream_desc_raw(reader, reader->currentStream);
+-    if (!desc)
++
++s32 cellPamfReaderGetStreamInfo(CellPamfReader* pSelf, void* pInfo, u32 size)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pInfo;
++    const PamfStream* s;
++    const u8* d;
++    u8 type;
++
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (h->current >= h->stream_count)
+         return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
+-
+-    s32 sdkType = raw_type_to_sdk(desc[0]);
+-
+-    switch (sdkType) {
++    s = &h->streams[h->current];
++    d = s->specific;
++
++    if (pamf_coding_to_type(s->coding, s->stream_id, s->private_id, &type,
++                            NULL) != CELL_OK)
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    switch (type) {
+     case CELL_PAMF_STREAM_TYPE_AVC:
+-        if (infoSize >= sizeof(CellPamfAvcInfo)) {
+-            CellPamfAvcInfo* avc = (CellPamfAvcInfo*)info;
+-            memset(avc, 0, sizeof(*avc));
+-            avc->profileIdc            = desc[2];
+-            avc->levelIdc              = desc[3];
+-            avc->frameMbsOnlyFlag      = (desc[4] >> 7) & 1;
+-            avc->videoSignalInfoFlag   = (desc[4] >> 6) & 1;
+-            avc->frameRateCode         = (desc[5] >> 4) & 0x0F;
+-            avc->aspectRatioIdc        = desc[5] & 0x0F;
+-            avc->sarWidth              = be16(desc + 6);
+-            avc->sarHeight             = be16(desc + 8);
+-            avc->horizontalSize        = be16(desc + 14);
+-            avc->verticalSize          = be16(desc + 16);
+-            avc->frameCropLeftOffset   = desc[18];
+-            avc->frameCropRightOffset  = desc[19];
+-            avc->frameCropTopOffset    = desc[20];
+-            avc->frameCropBottomOffset = desc[21];
+-
+-            printf("[cellPamf] AVC info: profile=%u level=%u %ux%u "
+-                   "frameRate=%u aspect=%u\n",
+-                   avc->profileIdc, avc->levelIdc,
+-                   avc->horizontalSize, avc->verticalSize,
+-                   avc->frameRateCode, avc->aspectRatioIdc);
++        if (size < 0x20)
++            return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++        for (u32 o = 0; o < 0x20; o += 4)
++            vm_write32(ea + o, 0);
++        vm_write8(ea + 0x00, d[0]);              /* profileIdc */
++        vm_write8(ea + 0x01, d[1]);              /* levelIdc */
++        vm_write8(ea + 0x02, (d[2] >> 7) & 1);   /* frameMbsOnlyFlag */
++        vm_write8(ea + 0x03, (d[2] >> 6) & 1);   /* videoSignalInfoFlag */
++        vm_write8(ea + 0x04, (u8)((d[2] & 0x0F) ? (d[2] & 0x0F) - 1 : 0));
++        vm_write8(ea + 0x05, d[3]);              /* aspectRatioIdc */
++        vm_write16(ea + 0x06, d[3] == 0xFF ? be16(d + 4) : 0);
++        vm_write16(ea + 0x08, d[3] == 0xFF ? be16(d + 6) : 0);
++        vm_write16(ea + 0x0A, (u16)(d[9] * 16)); /* horizontalSize */
++        vm_write16(ea + 0x0C, (u16)(d[11] * 16));/* verticalSize */
++        vm_write16(ea + 0x0E, be16(d + 12));     /* crop left */
++        vm_write16(ea + 0x10, be16(d + 14));     /* crop right */
++        vm_write16(ea + 0x12, be16(d + 16));     /* crop top */
++        vm_write16(ea + 0x14, be16(d + 18));     /* crop bottom */
++        if ((d[2] >> 6) & 1) {
++            vm_write8(ea + 0x16, (d[20] >> 5) & 0x07);
++            vm_write8(ea + 0x17, (d[20] >> 4) & 1);
++            vm_write8(ea + 0x18, d[21]);
++            vm_write8(ea + 0x19, d[22]);
++            vm_write8(ea + 0x1A, d[23]);
+         }
++        vm_write8(ea + 0x1B, (d[24] >> 7) & 1);
++        vm_write8(ea + 0x1C, (d[24] >> 6) & 1);
++        vm_write8(ea + 0x1D, (d[24] >> 4) & 0x03);
++        vm_write8(ea + 0x1E, d[24] & 0x03);
++        vm_write8(ea + 0x1F, d[25]);
++        printf("[cellPamf] AVC info: %ux%u crop=%u/%u/%u/%u frameRateInfo=%u "
++               "profile=%u level=%u\n",
++               d[9] * 16, d[11] * 16, be16(d + 12), be16(d + 14),
++               be16(d + 16), be16(d + 18),
++               (d[2] & 0x0F) ? (d[2] & 0x0F) - 1 : 0, d[0], d[1]);
+         break;
+ 
++    case CELL_PAMF_STREAM_TYPE_M2V:
++        if (size < 0x18)
++            return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++        for (u32 o = 0; o < 0x18; o += 4)
++            vm_write32(ea + o, 0);
++        vm_write8(ea + 0x00, d[0] == 0x44 ? 3 : (d[0] == 0x48 ? 1 : 0xFF));
++        vm_write8(ea + 0x01, (d[2] >> 7) & 1);
++        vm_write8(ea + 0x02, (d[2] >> 6) & 1);
++        vm_write8(ea + 0x03, d[2] & 0x0F);
++        vm_write8(ea + 0x04, d[3]);
++        vm_write16(ea + 0x06, d[3] == 0xFF ? be16(d + 4) : 0);
++        vm_write16(ea + 0x08, d[3] == 0xFF ? be16(d + 6) : 0);
++        vm_write16(ea + 0x0A, (u16)(d[9] * 16));
++        vm_write16(ea + 0x0C, (u16)(d[11] * 16));
++        vm_write16(ea + 0x0E, be16(d + 12));
++        vm_write16(ea + 0x10, be16(d + 14));
++        vm_write8(ea + 0x12, (d[20] >> 5) & 0x07);
++        vm_write8(ea + 0x13, (d[20] >> 4) & 1);
++        vm_write8(ea + 0x14, d[21]);
++        vm_write8(ea + 0x15, d[22]);
++        vm_write8(ea + 0x16, d[23]);
++        break;
++
+     case CELL_PAMF_STREAM_TYPE_ATRAC3PLUS:
+-        if (infoSize >= sizeof(CellPamfAtrac3plusInfo)) {
+-            CellPamfAtrac3plusInfo* at3 = (CellPamfAtrac3plusInfo*)info;
+-            memset(at3, 0, sizeof(*at3));
+-            at3->numberOfChannels  = audio_channels(desc[10]);
+-            at3->samplingFrequency = audio_sample_rate(desc[12]);
+-
+-            printf("[cellPamf] ATRAC3+ info: %u ch, %u Hz\n",
+-                   at3->numberOfChannels, at3->samplingFrequency);
+-        }
++    case CELL_PAMF_STREAM_TYPE_AC3: {
++        u32 freq;
++        if (size < 8)
++            return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++        for (u32 o = 0; o < 8; o += 4)
++            vm_write32(ea + o, 0);
++        freq = d[3] == 2 ? 44100u : 48000u;
++        vm_write32(ea + 0x0, freq);
++        vm_write8(ea + 0x4, d[2]);
++        printf("[cellPamf] %s info: %u ch, %u Hz\n",
++               type == CELL_PAMF_STREAM_TYPE_AC3 ? "AC3" : "ATRAC3+",
++               d[2], freq);
+         break;
+-
+-    case CELL_PAMF_STREAM_TYPE_PAMF_LPCM:
+-        if (infoSize >= sizeof(CellPamfLpcmInfo)) {
+-            CellPamfLpcmInfo* lpcm = (CellPamfLpcmInfo*)info;
+-            memset(lpcm, 0, sizeof(*lpcm));
+-            lpcm->numberOfChannels  = audio_channels(desc[10]);
+-            lpcm->bitsPerSample     = lpcm_bits(desc[11]);
+-            lpcm->samplingFrequency = audio_sample_rate(desc[12]);
+-
+-            printf("[cellPamf] LPCM info: %u ch, %u Hz, %u bits\n",
+-                   lpcm->numberOfChannels, lpcm->samplingFrequency,
+-                   lpcm->bitsPerSample);
+-        }
++    }
++
++    case CELL_PAMF_STREAM_TYPE_PAMF_LPCM: {
++        u32 freq, bits;
++        if (size < 8)
++            return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++        for (u32 o = 0; o < 8; o += 4)
++            vm_write32(ea + o, 0);
++        freq = d[3] == 2 ? 44100u : 48000u;
++        bits = d[4] == 3 ? 24u : 16u;
++        vm_write32(ea + 0x0, freq);
++        vm_write8(ea + 0x4, d[2]);
++        vm_write16(ea + 0x6, (u16)bits);
+         break;
+-
+-    case CELL_PAMF_STREAM_TYPE_AC3:
+-        if (infoSize >= sizeof(CellPamfAc3Info)) {
+-            CellPamfAc3Info* ac3 = (CellPamfAc3Info*)info;
+-            memset(ac3, 0, sizeof(*ac3));
+-            ac3->numberOfChannels  = audio_channels(desc[10]);
+-            ac3->samplingFrequency = audio_sample_rate(desc[12]);
+-
+-            printf("[cellPamf] AC3 info: %u ch, %u Hz\n",
+-                   ac3->numberOfChannels, ac3->samplingFrequency);
+-        }
+-        break;
++    }
+ 
+     default:
+         return (s32)CELL_PAMF_ERROR_NOT_AVAILABLE;
+@@ -448,59 +753,206 @@
+     return CELL_OK;
+ }
+ 
+-s32 cellPamfReaderGetStreamIndex(CellPamfReader* reader)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    return reader->currentStream;
+-}
+-
+-s32 cellPamfStreamTypeToEsFilterId(u8 streamType, u8 streamIndex,
+-                                     void* esFilterId)
+-{
+-    (void)streamType; (void)streamIndex;
+-    if (!esFilterId)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    /* Set filter ID bytes (type + index) */
+-    u8* id = (u8*)esFilterId;
+-    id[0] = streamType;
+-    id[1] = streamIndex;
+-    return CELL_OK;
+-}
+-
+ /* ---------------------------------------------------------------------------
+- * Entry point navigation
++ * Entry points
+  * -----------------------------------------------------------------------*/
+ 
+-s32 cellPamfReaderGetNumberOfEp(CellPamfReader* reader, s32* numEp)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader || !numEp)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    vm_write32((u32)(uintptr_t)numEp, be32(base + PAMF_OFF_EP_COUNT));
+-    return CELL_OK;
+-}
+-
+-s32 cellPamfReaderGetEp(CellPamfReader* reader, u32 epIndex, CellPamfEp* ep)
+-{
+-    reader = pamf_host(reader);
+-    if (!reader || !ep)
+-        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
+-
+-    const u8* base = (const u8*)reader->pamfAddr;
+-    u32 epCount = be32(base + PAMF_OFF_EP_COUNT);
+-    if (epIndex >= epCount)
++static const u8* pamf_ep_ptr(PamfHost* h, u32 index)
++{
++    if (!h || h->current >= h->stream_count)
++        return NULL;
++    {
++        const PamfStream* s = &h->streams[h->current];
++        if (index >= s->ep_num)
++            return NULL;
++        if (s->ep_offset + (index + 1) * 12u > h->header_size)
++            return NULL;
++        return h->base + s->ep_offset + index * 12u;
++    }
++}
++
++static void pamf_ep_write(u32 ep_ea, const u8* packed)
++{
++    u16 v0 = be16(packed + 0);
++    vm_write32(ep_ea + 0x00, (u32)(v0 >> 14) + 1);
++    vm_write32(ep_ea + 0x04, ((u32)(v0 & 0x1FFF) * 0x800u) + 0x800u);
++    vm_write32(ep_ea + 0x08, be16(packed + 2));
++    vm_write32(ep_ea + 0x0C, be32(packed + 4));
++    vm_write64(ep_ea + 0x10, (u64)be32(packed + 8) * 0x800ull);
++}
++
++u32 cellPamfReaderGetNumberOfEp(CellPamfReader* pSelf)
++{
++    PamfHost* h = pamf_host(pSelf);
++    if (!h || h->current >= h->stream_count)
++        return 0;
++    return h->streams[h->current].ep_num;
++}
++
++s32 cellPamfReaderGetEpWithIndex(CellPamfReader* pSelf, u32 epIndex,
++                                 CellPamfEp* pEp)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pEp;
++    const u8* ep;
++
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    ep = pamf_ep_ptr(h, epIndex);
++    if (!ep)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    pamf_ep_write(ea, ep);
++    return CELL_OK;
++}
++
++s32 cellPamfReaderGetEp(CellPamfReader* pSelf, u32 epIndex, CellPamfEp* pEp)
++{
++    return cellPamfReaderGetEpWithIndex(pSelf, epIndex, pEp);
++}
++
++s32 cellPamfReaderGetEpIteratorWithIndex(CellPamfReader* pSelf, u32 epIndex,
++                                         CellPamfEpIterator* pIt)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ea = (u32)(uintptr_t)pIt;
++
++    if (!h || !ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (h->current >= h->stream_count)
++        return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
++    if (h->attribute & CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER)
++        return (s32)CELL_PAMF_ERROR_NOT_AVAILABLE;
++    if (epIndex >= h->streams[h->current].ep_num)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (!pamf_ep_ptr(h, epIndex))
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    vm_write8 (ea + 0x0, 1);
++    vm_write8 (ea + 0x1, 0);
++    vm_write8 (ea + 0x2, 0);
++    vm_write8 (ea + 0x3, 0);
++    vm_write32(ea + 0x4, epIndex);
++    vm_write32(ea + 0x8, h->streams[h->current].ep_num);
++    vm_write32(ea + 0xC, h->guest_ea + h->streams[h->current].ep_offset +
++                            epIndex * 12u);
++    return CELL_OK;
++}
++
++s32 cellPamfReaderGetEpIteratorWithTimeStamp(CellPamfReader* pSelf,
++                                             const CellCodecTimeStamp* pTimeStamp,
++                                             CellPamfEpIterator* pIt)
++{
++    PamfHost* h = pamf_host(pSelf);
++    u32 ts_ea = (u32)(uintptr_t)pTimeStamp;
++    u32 it_ea = (u32)(uintptr_t)pIt;
++    u64 requested;
++    u32 i;
++
++    if (!h || !ts_ea || !it_ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++    if (h->current >= h->stream_count)
++        return (s32)CELL_PAMF_ERROR_STREAM_NOT_FOUND;
++    if (h->attribute & CELL_PAMF_ATTRIBUTE_MINIMUM_HEADER)
++        return (s32)CELL_PAMF_ERROR_NOT_AVAILABLE;
++    if (h->streams[h->current].ep_num == 0)
+         return (s32)CELL_PAMF_ERROR_EP_NOT_FOUND;
+ 
+-    /* EP table entries are at epOffset, each 8 bytes (pts + offset) */
+-    u32 epTableOff = be32(base + PAMF_OFF_EP_OFFSET);
+-    const u8* epData = base + epTableOff + epIndex * 8;
+-    vm_write32((u32)(uintptr_t)ep + 0, be32(epData));
+-    vm_write32((u32)(uintptr_t)ep + 4, be32(epData + 4));
+-    return CELL_OK;
+-}
++    requested = ((u64)vm_read32(ts_ea + 0) << 32) | vm_read32(ts_ea + 4);
++
++    i = h->streams[h->current].ep_num - 1;
++    while (i > 0) {
++        const u8* ep = pamf_ep_ptr(h, i);
++        u64 pts;
++        if (!ep)
++            break;
++        pts = ((u64)be16(ep + 2) << 32) | be32(ep + 4);
++        if (pts <= requested)
++            break;
++        i--;
++    }
++
++    if (!pamf_ep_ptr(h, i))
++        return (s32)CELL_PAMF_ERROR_INVALID_PAMF;
++
++    vm_write8 (it_ea + 0x0, 1);
++    vm_write8 (it_ea + 0x1, 0);
++    vm_write8 (it_ea + 0x2, 0);
++    vm_write8 (it_ea + 0x3, 0);
++    vm_write32(it_ea + 0x4, i);
++    vm_write32(it_ea + 0x8, h->streams[h->current].ep_num);
++    vm_write32(it_ea + 0xC, h->guest_ea + h->streams[h->current].ep_offset +
++                            i * 12u);
++    return CELL_OK;
++}
++
++s32 cellPamfEpIteratorGetEp(CellPamfEpIterator* pIt, CellPamfEp* pEp)
++{
++    u32 it_ea = (u32)(uintptr_t)pIt;
++    u32 ep_ea = (u32)(uintptr_t)pEp;
++    u32 packed;
++
++    if (!it_ea || !ep_ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    packed = vm_read32(it_ea + 0xC);
++    if (!packed)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    /* pCur points into the guest's PAMF buffer. */
++    {
++        u16 v0 = vm_read16(packed + 0);
++        u16 hi = vm_read16(packed + 2);
++        u32 lo = vm_read32(packed + 4);
++        u32 rpn = vm_read32(packed + 8);
++        u8 ep[12];
++        ep[0] = (u8)(v0 >> 8);
++        ep[1] = (u8)v0;
++        ep[2] = (u8)(hi >> 8);
++        ep[3] = (u8)hi;
++        ep[4] = (u8)(lo >> 24);
++        ep[5] = (u8)(lo >> 16);
++        ep[6] = (u8)(lo >> 8);
++        ep[7] = (u8)lo;
++        ep[8] = (u8)(rpn >> 24);
++        ep[9] = (u8)(rpn >> 16);
++        ep[10] = (u8)(rpn >> 8);
++        ep[11] = (u8)rpn;
++        pamf_ep_write(ep_ea, ep);
++    }
++    return CELL_OK;
++}
++
++s32 cellPamfEpIteratorMove(CellPamfEpIterator* pIt, s32 steps, CellPamfEp* pEp)
++{
++    u32 it_ea = (u32)(uintptr_t)pIt;
++    u32 index, num, pcur;
++    s32 new_index;
++
++    if (!it_ea)
++        return (s32)CELL_PAMF_ERROR_INVALID_ARG;
++
++    index = vm_read32(it_ea + 0x4);
++    num   = vm_read32(it_ea + 0x8);
++    pcur  = vm_read32(it_ea + 0xC);
++    if (num == 0)
++        return 0;
++
++    new_index = (s32)index + steps;
++    if (new_index < 0) {
++        steps = -(s32)index;
++        new_index = 0;
++    } else if ((u32)new_index >= num) {
++        steps = (s32)(num - index) - 1;
++        new_index = (s32)index + steps;
++    }
++
++    vm_write32(it_ea + 0x4, (u32)new_index);
++    vm_write32(it_ea + 0xC, (u32)((s32)pcur + steps * 12));
++
++    if (pEp) {
++        s32 rc = cellPamfEpIteratorGetEp(pIt, pEp);
++        if (rc != CELL_OK)
++            return rc;
++    }
++    return steps;
++}
+diff --git a/third_party/ps3recomp/libs/codec/cellDmux.h b/third_party/ps3recomp/libs/codec/cellDmux.h
+--- a/third_party/ps3recomp/libs/codec/cellDmux.h
++++ b/third_party/ps3recomp/libs/codec/cellDmux.h
+@@ -1,8 +1,9 @@
+ /*
+  * ps3recomp - cellDmux HLE
+  *
+- * AV stream demultiplexer. Splits multiplexed PAMF streams into
+- * individual elementary streams (ES) for feeding to cellVdec/cellAdec.
++ * Generic demultiplexer with the PAMF backend GT6 uses.  PAMF data is a
++ * sequence of 2048-byte MPEG-2 program-stream packs; this module turns the
++ * packs into access units for cellVdec/cellAdec.
+  */
+ 
+ #ifndef PS3RECOMP_CELL_DMUX_H
+@@ -16,117 +17,176 @@
+ #endif
+ 
+ /* ---------------------------------------------------------------------------
+- * Error codes
++ * Error codes (unchanged; these were already correct)
+  * -----------------------------------------------------------------------*/
+-#define CELL_DMUX_ERROR_ARG            0x80610201
+-#define CELL_DMUX_ERROR_SEQ            0x80610202
+-#define CELL_DMUX_ERROR_BUSY           0x80610203
+-#define CELL_DMUX_ERROR_EMPTY          0x80610204
+-#define CELL_DMUX_ERROR_FATAL          0x80610205
++#define CELL_DMUX_ERROR_ARG    0x80610201
++#define CELL_DMUX_ERROR_SEQ    0x80610202
++#define CELL_DMUX_ERROR_BUSY   0x80610203
++#define CELL_DMUX_ERROR_EMPTY  0x80610204
++#define CELL_DMUX_ERROR_FATAL  0x80610205
+ 
+ /* ---------------------------------------------------------------------------
+  * Constants
+  * -----------------------------------------------------------------------*/
+-#define CELL_DMUX_MAX_HANDLES          8
+-#define CELL_DMUX_MAX_ES               16
++#define CELL_DMUX_MAX_HANDLES  8
++#define CELL_DMUX_MAX_ES       16
+ 
+-/* Demux types */
+-#define CELL_DMUX_TYPE_PAMF            0
++#define CELL_DMUX_STREAM_TYPE_UNDEF      0
++#define CELL_DMUX_STREAM_TYPE_PAMF       1
++#define CELL_DMUX_STREAM_TYPE_TERMINATOR 2
+ 
+-/* ES message types (delivered via callback) */
+-#define CELL_DMUX_MSG_TYPE_DEMUX_DONE      0
+-#define CELL_DMUX_MSG_TYPE_FATAL_ERR       1
+-#define CELL_DMUX_MSG_TYPE_PROG_END_CODE   2
++#define CELL_DMUX_MSG_TYPE_DEMUX_DONE     0
++#define CELL_DMUX_MSG_TYPE_FATAL_ERR      1
++#define CELL_DMUX_MSG_TYPE_PROG_END_CODE  2
+ 
+-#define CELL_DMUX_ES_MSG_TYPE_AU_FOUND     0
+-#define CELL_DMUX_ES_MSG_TYPE_FLUSH_DONE   1
++#define CELL_DMUX_ES_MSG_TYPE_AU_FOUND    0
++#define CELL_DMUX_ES_MSG_TYPE_FLUSH_DONE  1
+ 
+ /* ---------------------------------------------------------------------------
+- * Types
++ * Guest ABI structures (descriptions; fields are written through vm_write*)
+  * -----------------------------------------------------------------------*/
+ 
+-typedef u32 CellDmuxHandle;
+-typedef u32 CellDmuxEsHandle;
++/* Real layout is three s32 words, not four u32 words. */
++typedef struct CellDmuxType {
++    s32 streamType;
++    s32 reserved1;
++    s32 reserved2;
++} CellDmuxType;
+ 
+-typedef struct CellDmuxType {
+-    u32 streamType;
+-    u32 reserved[3];
+-} CellDmuxType;
++typedef struct CellDmuxType2 {
++    s32 streamType;
++    u32 streamSpecificInfo;
++} CellDmuxType2;
+ 
+ typedef struct CellDmuxResource {
+     u32 memAddr;
+     u32 memSize;
+-    u32 ppuThreadPrio;
++    u32 ppuThreadPriority;
+     u32 ppuThreadStackSize;
+-    u32 spuThreadPrio;
++    u32 spuThreadPriority;
+     u32 numOfSpus;
+ } CellDmuxResource;
+ 
+-typedef struct CellDmuxEsFilterId {
+-    u8 filterIdMajor;
+-    u8 filterIdMinor;
+-    u8 supplementalInfo1;
+-    u8 supplementalInfo2;
+-} CellDmuxEsFilterId;
++typedef struct CellDmuxResourceEx {
++    u32 memAddr;
++    u32 memSize;
++    u32 ppuThreadPriority;
++    u32 ppuThreadStackSize;
++    u32 spurs;
++    u32 priorityLo;
++    u32 priorityHi;
++    u32 maxContention;
++} CellDmuxResourceEx;
+ 
+ typedef struct CellDmuxEsResource {
+     u32 memAddr;
+     u32 memSize;
+ } CellDmuxEsResource;
+ 
++typedef struct CellDmuxCb {
++    u32 cbFunc;   /* guest OPD */
++    u32 cbArg;
++} CellDmuxCb;
++
++typedef struct CellDmuxMsg {
++    s32 msgType;
++    u32 reserved;
++    u64 supplementalInfo;
++} CellDmuxMsg;
++
++typedef struct CellDmuxEsMsg {
++    s32 msgType;
++    u32 reserved;
++    u64 supplementalInfo;
++} CellDmuxEsMsg;
++
++typedef struct CellDmuxAttr {
++    u32 memSize;
++    u32 demuxerVerUpper;
++    u32 demuxerVerLower;
++} CellDmuxAttr;
++
++typedef struct CellDmuxPamfAttr {
++    u32 maxEnabledEsNum;
++    u32 version;
++    u32 memSize;
++} CellDmuxPamfAttr;
++
++typedef struct CellDmuxEsAttr {
++    u32 memSize;
++} CellDmuxEsAttr;
++
++typedef struct CellDmuxPamfEsAttr {
++    u32 auQueueMaxSize;
++    u32 memSize;
++    u32 specificInfoSize;
++} CellDmuxPamfEsAttr;
++
++/* 0x28 bytes: auAddr, auSize, auMaxSize, isRap, userData, pts, dts.
++ * u64 fields are split into upper/lower words exactly as the guest stores
++ * them, so callers must not treat pts/dts as native u64. */
+ typedef struct CellDmuxAuInfo {
+     u32 auAddr;
+     u32 auSize;
+-    u64 pts;
+-    u64 dts;
++    u32 auMaxSize;
++    u8  isRap;
++    u8  reserved[3];
+     u64 userData;
+-    u32 isRap;       /* random access point */
+-    u32 reserved;
++    u32 ptsUpper;
++    u32 ptsLower;
++    u32 dtsUpper;
++    u32 dtsLower;
+ } CellDmuxAuInfo;
+ 
+-typedef struct CellDmuxAuInfoEx {
+-    u32 auAddr;
+-    u32 auSize;
+-    u64 pts;
+-    u64 dts;
+-    u64 userData;
+-    u32 isRap;
+-    u32 reserved;
+-    u32 auSpecificInfo;
+-} CellDmuxAuInfoEx;
+-
+-/* Callback types */
+-typedef u32 (*CellDmuxCbMsg)(u32 handle, u32 msgType, u32 msgData, void* cbArg);
+-typedef u32 (*CellDmuxCbEsMsg)(u32 handle, u32 esHandle, u32 msgType,
+-                                 u32 msgData, void* cbArg);
++#ifndef PS3RECOMP_CODEC_ES_FILTER_ID_DEFINED
++#define PS3RECOMP_CODEC_ES_FILTER_ID_DEFINED
++typedef struct CellCodecEsFilterId {
++    u32 filterIdMajor;
++    u32 filterIdMinor;
++    u32 supplementalInfo1;
++    u32 supplementalInfo2;
++} CellCodecEsFilterId;
++#endif
+ 
+ /* ---------------------------------------------------------------------------
+  * Functions
+  * -----------------------------------------------------------------------*/
+ 
+-/* Demuxer lifecycle */
+-s32 cellDmuxOpen(const CellDmuxType* type, const CellDmuxResource* res,
+-                  CellDmuxCbMsg cbFunc, void* cbArg, CellDmuxHandle* handle);
+-s32 cellDmuxClose(CellDmuxHandle handle);
++s32 cellDmuxQueryAttr(const CellDmuxType* demuxerType, void* demuxerAttr);
++s32 cellDmuxQueryAttr2(const CellDmuxType2* demuxerType2, void* demuxerAttr);
+ 
+-/* ES management */
+-s32 cellDmuxEnableEs(CellDmuxHandle handle, const CellDmuxEsFilterId* esFilterId,
+-                      const CellDmuxEsResource* esRes,
+-                      CellDmuxCbEsMsg esCbFunc, void* esCbArg,
+-                      CellDmuxEsHandle* esHandle);
+-s32 cellDmuxDisableEs(CellDmuxEsHandle esHandle);
++s32 cellDmuxOpen(const CellDmuxType* demuxerType,
++                 const CellDmuxResource* demuxerResource,
++                 const CellDmuxCb* demuxerCb, u32* demuxerHandle);
++s32 cellDmuxOpenEx(const CellDmuxType* demuxerType,
++                   const void* demuxerResourceEx,
++                   const CellDmuxCb* demuxerCb, u32* demuxerHandle);
++s32 cellDmuxClose(u32 demuxerHandle);
+ 
+-/* Data feeding */
+-s32 cellDmuxSetStream(CellDmuxHandle handle, u32 streamAddr, u32 streamSize,
+-                       b8 discontinuity, u64 userData);
+-s32 cellDmuxResetStream(CellDmuxHandle handle);
+-s32 cellDmuxResetStreamAndWaitDone(CellDmuxHandle handle);
++s32 cellDmuxQueryEsAttr(const CellDmuxType* demuxerType,
++                        const void* esFilterId, const void* esSpecificInfo,
++                        void* esAttr);
++s32 cellDmuxQueryEsAttr2(const CellDmuxType2* demuxerType2,
++                         const void* esFilterId, const void* esSpecificInfo,
++                         void* esAttr);
+ 
+-/* AU retrieval */
+-s32 cellDmuxGetAu(CellDmuxEsHandle esHandle, CellDmuxAuInfo** auInfo, u32* auInfoNum);
+-s32 cellDmuxPeekAu(CellDmuxEsHandle esHandle, CellDmuxAuInfo** auInfo, u32* auInfoNum);
+-s32 cellDmuxReleaseAu(CellDmuxEsHandle esHandle);
+-s32 cellDmuxFlushEs(CellDmuxEsHandle esHandle);
++s32 cellDmuxEnableEs(u32 demuxerHandle, const void* esFilterId,
++                     const CellDmuxEsResource* esResourceInfo,
++                     const CellDmuxCb* esCb, const void* esSpecificInfo,
++                     u32* esHandle);
++s32 cellDmuxDisableEs(u32 esHandle);
++
++s32 cellDmuxSetStream(u32 demuxerHandle, u32 streamAddress, u32 streamSize,
++                      b8 discontinuity, u64 userData);
++s32 cellDmuxResetStream(u32 demuxerHandle);
++s32 cellDmuxResetStreamAndWaitDone(u32 demuxerHandle);
++
++s32 cellDmuxGetAu(u32 esHandle, u32* auInfo, u32* auSpecificInfo);
++s32 cellDmuxGetAuEx(u32 esHandle, u32* auInfoEx, u32* auSpecificInfo);
++s32 cellDmuxPeekAu(u32 esHandle, u32* auInfo, u32* auSpecificInfo);
++s32 cellDmuxReleaseAu(u32 esHandle);
++s32 cellDmuxFlushEs(u32 esHandle);
++s32 cellDmuxResetEs(u32 esHandle);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/third_party/ps3recomp/libs/codec/cellDmux.c b/third_party/ps3recomp/libs/codec/cellDmux.c
+--- a/third_party/ps3recomp/libs/codec/cellDmux.c
++++ b/third_party/ps3recomp/libs/codec/cellDmux.c
+@@ -1,290 +1,999 @@
+ /*
+- * ps3recomp - cellDmux HLE implementation
++ * ps3recomp - cellDmux HLE implementation (PAMF backend)
+  *
+- * Stub demuxer that accepts PAMF data and reports AU-found callbacks.
+- * Without real MPEG-TS parsing, this provides the API surface games
+- * expect while the video pipeline is built out.
++ * PAMF data is a sequence of 2048-byte MPEG-2 program-stream packs.  Each
++ * pack starts with 00 00 01 BA; the first pack also carries the system
++ * header (0xBB) and program stream map (0xBF), then PES packets:
++ *
++ *   video    00 00 01 E0        (AVC: AUD-delimited access units)
++ *   audio    00 00 01 BD        (first payload byte = private_stream_id,
++ *                                then four prefix bytes, then ATS frames)
++ *
++ * AVC access units are split at access-unit delimiter NALs
++ * (00 00 00 01 09 / 00 00 01 09).  ATRAC3+ access units are split at the
++ * 0x0FD0 ATS sync, using the first inter-sync distance as the frame size.
++ * Completed AUs are copied into the guest's CellDmuxEsResource memory (or a
++ * committed HLE fallback) and announced with AU_FOUND.
++ *
++ * No container code is borrowed from PAMFtool or RPCS3; this is a direct
++ * implementation of the public pack/PES layout.
+  */
+ 
+ #include "cellDmux.h"
+ #include <stdio.h>
++#include <stdlib.h>
+ #include <string.h>
+-#include "../../runtime/ppu/ppu_memory.h"   /* vm_write*: guest EA -> host, byte-swapped */
+-#include "../guest_struct.h"   /* GUEST_EA, guest_struct_load/store */
++#include "../../runtime/ppu/ppu_memory.h"
++#include "../../runtime/memory/vm.h"
++#include "ps3emu/guest_call.h"
++
++#define DMUX_AU_QUEUE        8
++#define DMUX_AU_QUEUE_BYTES  (8u * 1024u * 1024u)
++#define DMUX_ASM_CAP         (4u * 1024u * 1024u)
++#define DMUX_MARK_MAX        512
++#define DMUX_SCRATCH_OFF     0x80000u
++#define DMUX_FALLBACK_OFF    0x100000u
++#define DMUX_AU_SLOT_SIZE    0x180000u
++#define DMUX_AU_SLOTS        8u
++
++#define DMUX_DMSG_EA(h)  (VM_HLE_INJECT_BASE + DMUX_SCRATCH_OFF + (u32)(h) * 0x10u)
++#define DMUX_EMSG_EA(e)  (VM_HLE_INJECT_BASE + DMUX_SCRATCH_OFF + 0x200u + (u32)(e) * 0x10u)
++#define DMUX_INFO_EA(e)  (VM_HLE_INJECT_BASE + DMUX_SCRATCH_OFF + 0x400u + (u32)(e) * 0x28u)
++
++typedef struct {
++    u64 pos;
++    u64 pts;
++    u64 dts;
++} DmuxMark;
++
++typedef struct {
++    u8* data;
++    u32 size;
++    u64 pts;
++    u64 dts;
++    u64 user_data;
++    u8  is_rap;
++} DmuxReadyAu;
++
++typedef struct {
++    int      in_use;
++    u32      index;
++    u32      dmux_index;
++    u32      dmux_handle;       /* guest-visible handle (index + 1) */
++    u32      fmajor, fminor;    /* CellCodecEsFilterId */
++    u8       coding;            /* on-disc coding type (0x1B AVC, 0xDC ATRAC3+) */
++    u32      cb_func, cb_arg;
++    u32      mem_addr, mem_size;/* guest AU destination */
++    u8*      asm_buf;
++    u32      asm_len, asm_cap;
++    u64      asm_base;          /* absolute ES offset of asm_buf[0] */
++    u32      scan_pos;
++    u32      audio_frame_len;   /* learned from two ATS syncs */
++    u64      last_pts, last_dts;
++    int      have_last_pts;
++    DmuxMark marks[DMUX_MARK_MAX];
++    u32      mark_head, mark_count;
++    DmuxReadyAu q[DMUX_AU_QUEUE];
++    u32      q_head, q_count, q_bytes;
++    int      delivered;
++    u32      delivered_addr, delivered_size;
++    u64      stream_user_data;
++    u32      total_aus;
++    int      logged;
++} DmuxEs;
++
++typedef struct {
++    int      in_use;
++    u32      cb_func, cb_arg;
++    s32      stream_type;
++    u8*      pending;
++    u32      pending_len, pending_cap;
++    int      started;
++    u64      user_data;
++} DmuxSlot;
++
++static DmuxSlot s_dmux[CELL_DMUX_MAX_HANDLES];
++static DmuxEs   s_es[CELL_DMUX_MAX_ES];
++static u32      s_fallback_committed;
++static int      s_scratch_done;
++
++static u16 be16(const u8* p)
++{
++    return (u16)(((u16)p[0] << 8) | p[1]);
++}
++
++static u32 be32(const u8* p)
++{
++    return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
++}
++
++static u64 parse_pts(const u8* p)
++{
++    return ((u64)((p[0] >> 1) & 0x07) << 30) |
++           ((u64)p[1] << 22) |
++           ((u64)((p[2] >> 1) & 0x7F) << 15) |
++           ((u64)p[3] << 7) |
++           ((u64)p[4] >> 1);
++}
++
++static void dmux_scratch_init(void)
++{
++    if (s_scratch_done)
++        return;
++    s_scratch_done = 1;
++    vm_commit(VM_HLE_INJECT_BASE + DMUX_SCRATCH_OFF, 0x1000);
++}
++
++static DmuxSlot* dmux_slot(u32 handle)
++{
++    if (!handle || handle > CELL_DMUX_MAX_HANDLES)
++        return NULL;
++    return s_dmux[handle - 1].in_use ? &s_dmux[handle - 1] : NULL;
++}
++
++static DmuxEs* dmux_es_slot(u32 handle)
++{
++    if (!handle || handle > CELL_DMUX_MAX_ES)
++        return NULL;
++    return s_es[handle - 1].in_use ? &s_es[handle - 1] : NULL;
++}
+ 
+ /* ---------------------------------------------------------------------------
+- * Internal state
++ * Guest callbacks.  CellDmuxCbMsg is (handle, CellDmuxMsg*, cbArg) and
++ * CellDmuxCbEsMsg is (handle, esHandle, CellDmuxEsMsg*, cbArg).  Both are
++ * guest OPDs, never host function pointers.
+  * -----------------------------------------------------------------------*/
+-
+-typedef struct {
+-    int in_use;
+-    CellDmuxCbMsg cbFunc;
+-    void* cbArg;
+-    u32 streamType;
+-    /* Stream data tracking for demux processing */
+-    u32 streamAddr;
+-    u32 streamSize;
+-    u64 userData;
+-    u32 auSeqNo;        /* running AU sequence counter */
+-} DmuxSlot;
+-
+-typedef struct {
+-    int in_use;
+-    u32 dmuxId;
+-    CellDmuxEsFilterId filterId;
+-    CellDmuxCbEsMsg esCbFunc;
+-    void* esCbArg;
+-    CellDmuxAuInfo currentAu;
+-    int hasAu;
+-} DmuxEsSlot;
+-
+-static DmuxSlot s_dmux[CELL_DMUX_MAX_HANDLES];
+-static DmuxEsSlot s_es[CELL_DMUX_MAX_ES];
++static void dmux_notify(DmuxSlot* d, u32 handle, s32 msg_type)
++{
++    if (!d || !d->cb_func || !g_ps3_guest_caller)
++        return;
++    dmux_scratch_init();
++    {
++        u32 ea = DMUX_DMSG_EA(handle - 1);
++        vm_write32(ea + 0x0, (u32)msg_type);
++        vm_write32(ea + 0x4, 0);
++        vm_write64(ea + 0x8, 0);
++        g_ps3_guest_caller(d->cb_func, (u64)handle, (u64)ea, (u64)d->cb_arg,
++                           0, 0, 0, 0, 0);
++    }
++}
++
++static void dmux_es_notify(DmuxEs* es, s32 msg_type)
++{
++    if (!es || !es->cb_func || !g_ps3_guest_caller)
++        return;
++    dmux_scratch_init();
++    {
++        u32 ea = DMUX_EMSG_EA(es->index);
++        vm_write32(ea + 0x0, (u32)msg_type);
++        vm_write32(ea + 0x4, 0);
++        vm_write64(ea + 0x8, 0);
++        g_ps3_guest_caller(es->cb_func, (u64)es->dmux_handle,
++                           (u64)(es->index + 1), (u64)ea, (u64)es->cb_arg,
++                           0, 0, 0, 0);
++    }
++}
++
++/* ---------------------------------------------------------------------------
++ * Attribute queries
++ * -----------------------------------------------------------------------*/
++s32 cellDmuxQueryAttr(const CellDmuxType* demuxerType, void* demuxerAttr)
++{
++    u32 ea = (u32)(uintptr_t)demuxerAttr;
++    (void)demuxerType;
++    if (!ea)
++        return (s32)CELL_DMUX_ERROR_ARG;
++    vm_write32(ea + 0x0, 0x100000);      /* memSize */
++    vm_write32(ea + 0x4, 0x00010000);    /* demuxerVerUpper */
++    vm_write32(ea + 0x8, 0);             /* demuxerVerLower */
++    return CELL_OK;
++}
++
++s32 cellDmuxQueryAttr2(const CellDmuxType2* demuxerType2, void* demuxerAttr)
++{
++    (void)demuxerType2;
++    return cellDmuxQueryAttr(NULL, demuxerAttr);
++}
++
++static u32 dmux_es_attr_size(const void* esFilterId)
++{
++    u32 ea = (u32)(uintptr_t)esFilterId;
++    if (ea) {
++        u32 major = vm_read32(ea + 0x0);
++        if (major == 0xBD)
++            return 0x40000u;
++    }
++    return DMUX_AU_SLOT_SIZE;
++}
++
++s32 cellDmuxQueryEsAttr(const CellDmuxType* demuxerType,
++                        const void* esFilterId, const void* esSpecificInfo,
++                        void* esAttr)
++{
++    u32 ea = (u32)(uintptr_t)esAttr;
++    (void)demuxerType; (void)esSpecificInfo;
++    if (!ea)
++        return (s32)CELL_DMUX_ERROR_ARG;
++    vm_write32(ea, dmux_es_attr_size(esFilterId));
++    return CELL_OK;
++}
++
++s32 cellDmuxQueryEsAttr2(const CellDmuxType2* demuxerType2,
++                         const void* esFilterId, const void* esSpecificInfo,
++                         void* esAttr)
++{
++    (void)demuxerType2;
++    return cellDmuxQueryEsAttr(NULL, esFilterId, esSpecificInfo, esAttr);
++}
+ 
+ /* ---------------------------------------------------------------------------
+  * Demuxer lifecycle
+  * -----------------------------------------------------------------------*/
+-
+-s32 cellDmuxOpen(const CellDmuxType* type, const CellDmuxResource* res,
+-                  CellDmuxCbMsg cbFunc, void* cbArg, CellDmuxHandle* handle)
+-{
+-    (void)res;
+-
+-    printf("[cellDmux] Open(streamType=%u)\n",
+-           type ? vm_read32(GUEST_EA(type)) : 0);   /* streamType */
+-
+-    if (!type || !handle)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    for (int i = 0; i < CELL_DMUX_MAX_HANDLES; i++) {
++s32 cellDmuxOpen(const CellDmuxType* demuxerType,
++                 const CellDmuxResource* demuxerResource,
++                 const CellDmuxCb* demuxerCb, u32* demuxerHandle)
++{
++    u32 type_ea = (u32)(uintptr_t)demuxerType;
++    u32 cb_ea = (u32)(uintptr_t)demuxerCb;
++    u32 out_ea = (u32)(uintptr_t)demuxerHandle;
++    (void)demuxerResource;
++
++    if (!out_ea)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    for (u32 i = 0; i < CELL_DMUX_MAX_HANDLES; i++) {
+         if (!s_dmux[i].in_use) {
+-            s_dmux[i].in_use = 1;
+-            s_dmux[i].cbFunc = cbFunc;
+-            s_dmux[i].cbArg = cbArg;
+-            s_dmux[i].streamType = vm_read32(GUEST_EA(type));
+-            s_dmux[i].streamAddr = 0;
+-            s_dmux[i].streamSize = 0;
+-            s_dmux[i].userData = 0;
+-            s_dmux[i].auSeqNo = 0;
+-            vm_write32((u32)(uintptr_t)handle, (u32)i);
+-            printf("[cellDmux] Open -> handle=%u\n", i);
++            DmuxSlot* d = &s_dmux[i];
++            memset(d, 0, sizeof(*d));
++            d->in_use = 1;
++            d->stream_type = type_ea ? (s32)vm_read32(type_ea) : 0;
++            d->cb_func = cb_ea ? vm_read32(cb_ea + 0x0) : 0;
++            d->cb_arg  = cb_ea ? vm_read32(cb_ea + 0x4) : 0;
++            vm_write32(out_ea, i + 1);
++            printf("[cellDmux] OpenEx(type=%d, cb=0x%X) -> handle=%u\n",
++                   d->stream_type, d->cb_func, i + 1);
+             return CELL_OK;
+         }
+     }
+     return (s32)CELL_DMUX_ERROR_BUSY;
+ }
+ 
+-s32 cellDmuxClose(CellDmuxHandle handle)
+-{
+-    printf("[cellDmux] Close(handle=%u)\n", handle);
+-
+-    if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    /* Close associated ES handles */
+-    for (int i = 0; i < CELL_DMUX_MAX_ES; i++) {
+-        if (s_es[i].in_use && s_es[i].dmuxId == handle)
+-            s_es[i].in_use = 0;
+-    }
+-
+-    s_dmux[handle].in_use = 0;
++s32 cellDmuxOpenEx(const CellDmuxType* demuxerType,
++                   const void* demuxerResourceEx,
++                   const CellDmuxCb* demuxerCb, u32* demuxerHandle)
++{
++    (void)demuxerResourceEx;
++    return cellDmuxOpen(demuxerType, NULL, demuxerCb, demuxerHandle);
++}
++
++s32 cellDmuxClose(u32 demuxerHandle)
++{
++    DmuxSlot* d = dmux_slot(demuxerHandle);
++    if (!d)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    for (u32 i = 0; i < CELL_DMUX_MAX_ES; i++) {
++        if (s_es[i].in_use && s_es[i].dmux_index == demuxerHandle - 1) {
++            free(s_es[i].asm_buf);
++            memset(&s_es[i], 0, sizeof(s_es[i]));
++        }
++    }
++    free(d->pending);
++    memset(d, 0, sizeof(*d));
++    printf("[cellDmux] Close(handle=%u)\n", demuxerHandle);
+     return CELL_OK;
+ }
+ 
+ /* ---------------------------------------------------------------------------
+  * ES management
+  * -----------------------------------------------------------------------*/
+-
+-s32 cellDmuxEnableEs(CellDmuxHandle handle, const CellDmuxEsFilterId* esFilterId,
+-                      const CellDmuxEsResource* esRes,
+-                      CellDmuxCbEsMsg esCbFunc, void* esCbArg,
+-                      CellDmuxEsHandle* esHandle)
+-{
+-    (void)esRes;
+-
+-    printf("[cellDmux] EnableEs(dmux=%u, major=%u, minor=%u)\n",
+-           handle,
+-           esFilterId ? vm_read32(GUEST_EA(esFilterId)
+-                        + (u32)offsetof(CellDmuxEsFilterId, filterIdMajor)) : 0,
+-           esFilterId ? vm_read32(GUEST_EA(esFilterId)
+-                        + (u32)offsetof(CellDmuxEsFilterId, filterIdMinor)) : 0);
+-
+-    if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-    if (!esFilterId || !esHandle)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    for (int i = 0; i < CELL_DMUX_MAX_ES; i++) {
++s32 cellDmuxEnableEs(u32 demuxerHandle, const void* esFilterId,
++                     const CellDmuxEsResource* esResourceInfo,
++                     const CellDmuxCb* esCb, const void* esSpecificInfo,
++                     u32* esHandle)
++{
++    DmuxSlot* d = dmux_slot(demuxerHandle);
++    u32 fid_ea = (u32)(uintptr_t)esFilterId;
++    u32 res_ea = (u32)(uintptr_t)esResourceInfo;
++    u32 cb_ea = (u32)(uintptr_t)esCb;
++    u32 out_ea = (u32)(uintptr_t)esHandle;
++    u32 major = 0, minor = 0, mem_addr = 0, mem_size = 0;
++    u32 cb_func = 0, cb_arg = 0;
++    (void)esSpecificInfo;
++
++    if (!d || !fid_ea || !out_ea)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    major = vm_read32(fid_ea + 0x0);
++    minor = vm_read32(fid_ea + 0x4);
++    if (res_ea) {
++        mem_addr = vm_read32(res_ea + 0x0);
++        mem_size = vm_read32(res_ea + 0x4);
++    }
++    if (cb_ea) {
++        cb_func = vm_read32(cb_ea + 0x0);
++        cb_arg  = vm_read32(cb_ea + 0x4);
++    }
++
++    for (u32 i = 0; i < CELL_DMUX_MAX_ES; i++) {
+         if (!s_es[i].in_use) {
+-            s_es[i].in_use = 1;
+-            s_es[i].dmuxId = handle;
+-            guest_struct_load(&s_es[i].filterId, GUEST_EA(esFilterId),
+-                              (u32)sizeof(s_es[i].filterId));
+-            s_es[i].esCbFunc = esCbFunc;
+-            s_es[i].esCbArg = esCbArg;
+-            s_es[i].hasAu = 0;
+-            memset(&s_es[i].currentAu, 0, sizeof(CellDmuxAuInfo));
+-            vm_write32((u32)(uintptr_t)esHandle, (u32)i);
++            DmuxEs* es = &s_es[i];
++            memset(es, 0, sizeof(*es));
++            es->in_use = 1;
++            es->index = i;
++            es->dmux_index = demuxerHandle - 1;
++            es->dmux_handle = demuxerHandle;
++            es->fmajor = major;
++            es->fminor = minor;
++            es->coding = (major == 0xBD) ? 0xDC : 0x1B;
++            es->cb_func = cb_func;
++            es->cb_arg = cb_arg;
++            es->mem_addr = mem_addr;
++            es->mem_size = mem_size;
++            es->asm_cap = 0x20000;
++            es->asm_buf = (u8*)malloc(es->asm_cap);
++            if (!es->asm_buf) {
++                memset(es, 0, sizeof(*es));
++                return (s32)CELL_DMUX_ERROR_FATAL;
++            }
++            vm_write32(out_ea, i + 1);
++            printf("[cellDmux] EnableEs(dmux=%u, filter=%u/%u, mem=0x%X/0x%X, "
++                   "cb=0x%X) -> es=%u\n",
++                   demuxerHandle, major, minor, mem_addr, mem_size, cb_func, i + 1);
+             return CELL_OK;
+         }
+     }
+     return (s32)CELL_DMUX_ERROR_BUSY;
+ }
+ 
+-s32 cellDmuxDisableEs(CellDmuxEsHandle esHandle)
+-{
+-    printf("[cellDmux] DisableEs(es=%u)\n", esHandle);
+-
+-    if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    s_es[esHandle].in_use = 0;
++s32 cellDmuxDisableEs(u32 esHandle)
++{
++    DmuxEs* es = dmux_es_slot(esHandle);
++    if (!es)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    for (u32 i = 0; i < es->q_count; i++)
++        free(es->q[(es->q_head + i) % DMUX_AU_QUEUE].data);
++    free(es->asm_buf);
++    memset(es, 0, sizeof(*es));
+     return CELL_OK;
++}
++
++/* ---------------------------------------------------------------------------
++ * AU assembly
++ * -----------------------------------------------------------------------*/
++static int dmux_buf_reserve(DmuxEs* es, u32 extra)
++{
++    u32 need = es->asm_len + extra;
++    if (need <= es->asm_cap)
++        return 1;
++    if (need > DMUX_ASM_CAP)
++        return 0;
++    u32 cap = es->asm_cap;
++    while (cap < need)
++        cap *= 2;
++    if (cap > DMUX_ASM_CAP)
++        cap = DMUX_ASM_CAP;
++    u8* p = (u8*)realloc(es->asm_buf, cap);
++    if (!p)
++        return 0;
++    es->asm_buf = p;
++    es->asm_cap = cap;
++    return 1;
++}
++
++static void dmux_mark_add(DmuxEs* es, u64 pos, u64 pts, u64 dts)
++{
++    if (es->mark_count == DMUX_MARK_MAX) {
++        if (es->mark_head) {
++            memmove(es->marks, es->marks + es->mark_head,
++                    (es->mark_count - es->mark_head) * sizeof(es->marks[0]));
++            es->mark_count -= es->mark_head;
++            es->mark_head = 0;
++        }
++        if (es->mark_count == DMUX_MARK_MAX) {
++            memmove(es->marks, es->marks + 1,
++                    (DMUX_MARK_MAX - 1) * sizeof(es->marks[0]));
++            es->mark_count--;
++        }
++    }
++    es->marks[es->mark_count].pos = pos;
++    es->marks[es->mark_count].pts = pts;
++    es->marks[es->mark_count].dts = dts;
++    es->mark_count++;
++}
++
++/* Consume the latest mark at or before `start`.  Returns 1 if one was
++ * found, otherwise the caller synthesizes the next frame timestamp. */
++static int dmux_mark_take(DmuxEs* es, u64 start, u64* pts, u64* dts)
++{
++    int found = 0;
++    u64 p = 0, d = 0;
++    while (es->mark_head < es->mark_count &&
++           es->marks[es->mark_head].pos <= start) {
++        p = es->marks[es->mark_head].pts;
++        d = es->marks[es->mark_head].dts;
++        found = 1;
++        es->mark_head++;
++    }
++    if (es->mark_head > 64 && es->mark_head == es->mark_count) {
++        es->mark_head = es->mark_count = 0;
++    }
++    if (found) {
++        *pts = p;
++        *dts = d;
++    }
++    return found;
++}
++
++static void dmux_drop_front(DmuxEs* es, u32 n)
++{
++    if (n >= es->asm_len) {
++        es->asm_len = 0;
++        es->asm_base += n;
++        return;
++    }
++    memmove(es->asm_buf, es->asm_buf + n, es->asm_len - n);
++    es->asm_len -= n;
++    es->asm_base += n;
++}
++
++static int dmux_is_avc_idr(const u8* p, u32 len)
++{
++    for (u32 i = 0; i + 4 < len; i++) {
++        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 &&
++            (p[i + 3] & 0x1F) == 5)
++            return 1;
++    }
++    return 0;
++}
++
++static void dmux_queue_au(DmuxEs* es, const u8* data, u32 len, u64 pts,
++                          u64 dts, int is_rap)
++{
++    if (!len)
++        return;
++    if (len > DMUX_AU_SLOT_SIZE) {
++        printf("[cellDmux] ES %u: AU too large (%u > %u), dropped\n",
++               es->index, len, DMUX_AU_SLOT_SIZE);
++        return;
++    }
++    if (es->q_count >= DMUX_AU_QUEUE ||
++        es->q_bytes + len > DMUX_AU_QUEUE_BYTES) {
++        printf("[cellDmux] ES %u: AU queue full (%u AUs, %u bytes), dropped "
++               "AU pts=%llu size=%u\n",
++               es->index, es->q_count, es->q_bytes,
++               (unsigned long long)pts, len);
++        return;
++    }
++
++    DmuxReadyAu* au = &es->q[(es->q_head + es->q_count) % DMUX_AU_QUEUE];
++    au->data = (u8*)malloc(len);
++    if (!au->data)
++        return;
++    memcpy(au->data, data, len);
++    au->size = len;
++    au->pts = pts;
++    au->dts = dts;
++    au->user_data = es->stream_user_data;
++    au->is_rap = (u8)(is_rap ? 1 : 0);
++    es->q_count++;
++    es->q_bytes += len;
++    es->total_aus++;
++
++    if (!es->logged || es->total_aus <= 3) {
++        printf("[cellDmux] ES %u: AU #%u size=%u pts=%llu dts=%llu rap=%d\n",
++               es->index, es->total_aus, len,
++               (unsigned long long)pts, (unsigned long long)dts,
++               is_rap ? 1 : 0);
++        es->logged = 1;
++    }
++
++    dmux_es_notify(es, CELL_DMUX_ES_MSG_TYPE_AU_FOUND);
++}
++
++/* Compute the AU timestamp: a PES mark at/before the AU start wins, else the
++ * previous frame plus one frame period. */
++static void dmux_au_time(DmuxEs* es, u64 start, u32 frame_ticks,
++                         u64* pts, u64* dts)
++{
++    u64 p = 0, d = 0;
++    if (dmux_mark_take(es, start, &p, &d)) {
++        *pts = p;
++        *dts = d;
++    } else if (es->have_last_pts) {
++        *pts = es->last_pts + frame_ticks;
++        *dts = es->last_dts + frame_ticks;
++    } else {
++        *pts = 0;
++        *dts = 0;
++    }
++    es->last_pts = *pts;
++    es->last_dts = *dts;
++    es->have_last_pts = 1;
++}
++
++static void dmux_finalize_video(DmuxEs* es, u32 len)
++{
++    if (len < 5)
++        return;
++    u64 pts, dts;
++    dmux_au_time(es, es->asm_base, 3003, &pts, &dts);
++    dmux_queue_au(es, es->asm_buf, len, pts, dts,
++                  dmux_is_avc_idr(es->asm_buf, len));
++}
++
++static u32 dmux_find_aud(const u8* p, u32 len, u32 from)
++{
++    for (u32 i = from; i + 3 < len; i++) {
++        if (p[i] == 0 && p[i + 1] == 0 && p[i + 2] == 1 && p[i + 3] == 9) {
++            /* Include the extra zero of a 4-byte start code only when it is
++             * the very first byte of the stream.  Later 4-byte AUDs are cut
++             * at the 3-byte form; the extra zero stays at the end of the
++             * previous AU, where it is harmless. */
++            if (i == 1 && from == 0 && p[0] == 0)
++                return 0;
++            return i;
++        }
++    }
++    return 0xFFFFFFFFu;
++}
++
++static void dmux_scan_video(DmuxEs* es)
++{
++    for (;;) {
++        if (es->asm_len < 5)
++            return;
++        if (es->scan_pos >= es->asm_len)
++            es->scan_pos = 0;
++        u32 k = dmux_find_aud(es->asm_buf, es->asm_len, es->scan_pos);
++        if (k == 0xFFFFFFFFu) {
++            es->scan_pos = (es->asm_len > 3) ? es->asm_len - 3 : es->asm_len;
++            return;
++        }
++        if (k > 0) {
++            dmux_finalize_video(es, k);
++            dmux_drop_front(es, k);
++            es->scan_pos = 0;
++            continue;
++        }
++        /* k == 0: the buffer already starts at an AUD.  Skip the marker and
++         * look for the next one, which terminates this AU. */
++        es->scan_pos = 4;
++    }
++}
++
++static u32 dmux_find_sync(const u8* p, u32 len, u32 from)
++{
++    for (u32 i = from; i + 1 < len; i++)
++        if (p[i] == 0x0F && p[i + 1] == 0xD0)
++            return i;
++    return 0xFFFFFFFFu;
++}
++
++static void dmux_finalize_audio(DmuxEs* es, u32 len)
++{
++    u64 pts, dts;
++    if (len < 8)
++        return;
++    dmux_au_time(es, es->asm_base, 3840, &pts, &dts);
++    dmux_queue_au(es, es->asm_buf, len, pts, dts, 1);
++}
++
++static void dmux_scan_audio(DmuxEs* es)
++{
++    for (;;) {
++        if (es->asm_len < 8)
++            return;
++        if (es->asm_buf[0] != 0x0F || es->asm_buf[1] != 0xD0) {
++            u32 k = dmux_find_sync(es->asm_buf, es->asm_len, 1);
++            if (k == 0xFFFFFFFFu) {
++                if (es->asm_len > 1)
++                    dmux_drop_front(es, es->asm_len - 1);
++                return;
++            }
++            dmux_drop_front(es, k);
++            continue;
++        }
++        if (!es->audio_frame_len) {
++            u32 k = dmux_find_sync(es->asm_buf, es->asm_len, 2);
++            if (k == 0xFFFFFFFFu)
++                return;
++            if (k < 0x40 || k > 0x2000) {
++                dmux_drop_front(es, 1);
++                continue;
++            }
++            es->audio_frame_len = k;
++            printf("[cellDmux] ES %u: ATRAC3+ frame size %u bytes\n",
++                   es->index, k);
++        }
++        if (es->asm_len < es->audio_frame_len)
++            return;
++        dmux_finalize_audio(es, es->audio_frame_len);
++        dmux_drop_front(es, es->audio_frame_len);
++        if (es->asm_len >= 2 &&
++            (es->asm_buf[0] != 0x0F || es->asm_buf[1] != 0xD0))
++            es->audio_frame_len = 0;
++    }
++}
++
++static void dmux_es_feed(DmuxEs* es, const u8* data, u32 len, int has_pts,
++                         u64 pts, u64 dts, u64 user_data)
++{
++    if (!len)
++        return;
++    es->stream_user_data = user_data;
++    if (!dmux_buf_reserve(es, len)) {
++        printf("[cellDmux] ES %u: assembly buffer limit, dropping %u bytes\n",
++               es->index, len);
++        return;
++    }
++    if (has_pts)
++        dmux_mark_add(es, es->asm_base + es->asm_len, pts, dts);
++    memcpy(es->asm_buf + es->asm_len, data, len);
++    es->asm_len += len;
++    if (es->coding == 0x1B)
++        dmux_scan_video(es);
++    else
++        dmux_scan_audio(es);
++}
++
++/* ---------------------------------------------------------------------------
++ * Pack / PES parser
++ * -----------------------------------------------------------------------*/
++static DmuxEs* dmux_match_es(DmuxSlot* d, u8 sid, const u8* payload, u32 plen)
++{
++    DmuxEs* only = NULL;
++    u32 n = 0;
++    u32 di = (u32)(d - s_dmux);
++
++    for (u32 i = 0; i < CELL_DMUX_MAX_ES; i++) {
++        DmuxEs* es = &s_es[i];
++        if (!es->in_use || es->dmux_index != di || es->fmajor != sid)
++            continue;
++        if (sid == 0xBD) {
++            if (!plen)
++                continue;
++            if (es->fminor != payload[0]) {
++                only = es;
++                n++;
++                continue;
++            }
++        }
++        return es;
++    }
++    return (sid == 0xBD && n == 1) ? only : NULL;
++}
++
++static void dmux_pes(DmuxSlot* d, const u8* p, u32 len, u8 sid)
++{
++    u8 flags2, hlen;
++    u32 payload;
++    u64 pts = 0, dts = 0;
++    int has_pts = 0;
++    DmuxEs* es;
++
++    if (len < 9)
++        return;
++    flags2 = p[7];
++    hlen = p[8];
++    payload = 9u + hlen;
++    if (payload > len)
++        return;
++
++    if ((flags2 & 0x80) && hlen >= 5) {
++        pts = parse_pts(p + 9);
++        dts = pts;
++        has_pts = 1;
++        if ((flags2 & 0xC0) == 0xC0 && hlen >= 10)
++            dts = parse_pts(p + 14);
++    }
++
++    es = dmux_match_es(d, sid, p + payload, len - payload);
++    if (!es)
++        return;
++
++    const u8* data = p + payload;
++    u32 dlen = len - payload;
++    if (sid == 0xBD) {
++        /* PAMF private-stream prefix: one private_stream_id byte plus three
++         * bytes of PAMF framing, then the ATS/AC3/LPCM data. */
++        if (dlen < 4)
++            return;
++        data += 4;
++        dlen -= 4;
++    }
++    dmux_es_feed(es, data, dlen, has_pts, pts, dts, d->user_data);
++}
++
++static void dmux_pack(DmuxSlot* d, const u8* pack)
++{
++    u32 off = 14;
++
++    while (off + 6 <= 0x800) {
++        u8 sid;
++        u32 len, total;
++
++        if (pack[off] != 0 || pack[off + 1] != 0 || pack[off + 2] != 1)
++            break;
++        sid = pack[off + 3];
++        len = be16(pack + off + 4);
++        if (sid == 0xB9)
++            break;
++        total = 6u + len;
++        if (len == 0 || total < 6 || off + total > 0x800)
++            total = 0x800 - off;
++
++        if (sid == 0xBB || sid == 0xBF || sid == 0xBE) {
++            off += total;
++            continue;
++        }
++        if (sid == 0xBD || (sid >= 0xC0 && sid <= 0xEF))
++            dmux_pes(d, pack + off, total, sid);
++        off += total;
++    }
++}
++
++static int dmux_pending_reserve(DmuxSlot* d, u32 extra)
++{
++    u32 need = d->pending_len + extra;
++    if (need <= d->pending_cap)
++        return 1;
++    u32 cap = d->pending_cap ? d->pending_cap : 0x20000;
++    while (cap < need)
++        cap *= 2;
++    u8* p = (u8*)realloc(d->pending, cap);
++    if (!p)
++        return 0;
++    d->pending = p;
++    d->pending_cap = cap;
++    return 1;
++}
++
++static void dmux_process(DmuxSlot* d)
++{
++    u32 off = 0;
++
++    while (d->pending_len - off >= 4) {
++        u8* p = d->pending + off;
++        u32 avail = d->pending_len - off;
++
++        if (!d->started) {
++            if (avail >= 0x54 &&
++                p[0] == 'P' && p[1] == 'A' && p[2] == 'M' && p[3] == 'F') {
++                u32 hs = be32(p + 0x08) * 0x800u;
++                if (!hs)
++                    hs = 0x1000;
++                if (avail < hs)
++                    break;
++                off += hs;
++                d->started = 1;
++                continue;
++            }
++            /* Find the first pack start in whatever the guest handed us. */
++            u32 k;
++            for (k = 0; k + 4 <= avail; k++)
++                if (p[k] == 0 && p[k + 1] == 0 && p[k + 2] == 1 &&
++                    p[k + 3] == 0xBA)
++                    break;
++            if (k + 4 > avail) {
++                if (avail > 3)
++                    off += avail - 3;       /* keep a possible split magic */
++                break;
++            }
++            off += k;
++            d->started = 1;
++            continue;
++        }
++
++        if (avail < 0x800)
++            break;
++        if (p[0] != 0 || p[1] != 0 || p[2] != 1 || p[3] != 0xBA) {
++            d->started = 0;
++            continue;
++        }
++        dmux_pack(d, p);
++        off += 0x800;
++    }
++
++    if (off) {
++        memmove(d->pending, d->pending + off, d->pending_len - off);
++        d->pending_len -= off;
++    }
+ }
+ 
+ /* ---------------------------------------------------------------------------
+  * Data feeding
+  * -----------------------------------------------------------------------*/
+-
+-s32 cellDmuxSetStream(CellDmuxHandle handle, u32 streamAddr, u32 streamSize,
+-                       b8 discontinuity, u64 userData)
+-{
+-    printf("[cellDmux] SetStream(handle=%u, addr=0x%X, size=%u, discont=%d)\n",
+-           handle, streamAddr, streamSize, discontinuity);
+-
+-    if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    DmuxSlot* dmux = &s_dmux[handle];
+-
+-    /* Track the stream data */
+-    dmux->streamAddr = streamAddr;
+-    dmux->streamSize = streamSize;
+-    dmux->userData = userData;
+-
+-    if (discontinuity) {
+-        /* On discontinuity, reset AU sequence and clear pending AUs */
+-        dmux->auSeqNo = 0;
+-        for (int i = 0; i < CELL_DMUX_MAX_ES; i++) {
+-            if (s_es[i].in_use && s_es[i].dmuxId == handle)
+-                s_es[i].hasAu = 0;
+-        }
+-    }
+-
+-    /*
+-     * Synthesize one AU per enabled ES from the entire stream buffer.
+-     * Real demux would parse PES/MPEG-TS headers; here we present the
+-     * whole input as a single Access Unit per elementary stream, which
+-     * is sufficient for games that simply shuttle data through the
+-     * demux -> vdec/adec pipeline.
+-     */
+-    for (int i = 0; i < CELL_DMUX_MAX_ES; i++) {
+-        if (!s_es[i].in_use || s_es[i].dmuxId != handle)
+-            continue;
+-
+-        DmuxEsSlot* es = &s_es[i];
+-
+-        /* Fill in AU info — treat entire stream as one AU */
+-        es->currentAu.auAddr = streamAddr;
+-        es->currentAu.auSize = streamSize;
+-        es->currentAu.pts    = (u64)dmux->auSeqNo * 3003; /* ~29.97 fps tick */
+-        es->currentAu.dts    = es->currentAu.pts;
+-        es->currentAu.userData = userData;
+-        es->currentAu.isRap  = (dmux->auSeqNo == 0) ? 1 : 0;
+-        es->currentAu.reserved = 0;
+-        es->hasAu = 1;
+-
+-        printf("[cellDmux] ES %d: AU_FOUND (addr=0x%X, size=%u, pts=%llu)\n",
+-               i, streamAddr, streamSize, (unsigned long long)es->currentAu.pts);
+-
+-        /* Fire AU_FOUND callback */
+-        if (es->esCbFunc)
+-            es->esCbFunc(handle, (u32)i,
+-                         CELL_DMUX_ES_MSG_TYPE_AU_FOUND,
+-                         0, es->esCbArg);
+-    }
+-
+-    dmux->auSeqNo++;
+-
+-    /* Signal demux completion after all ES callbacks have fired */
+-    if (dmux->cbFunc)
+-        dmux->cbFunc(handle, CELL_DMUX_MSG_TYPE_DEMUX_DONE,
+-                     0, dmux->cbArg);
+-
++static void dmux_reset_es_stream(DmuxEs* es)
++{
++    for (u32 i = 0; i < es->q_count; i++)
++        free(es->q[(es->q_head + i) % DMUX_AU_QUEUE].data);
++    es->q_head = es->q_count = es->q_bytes = 0;
++    es->asm_len = 0;
++    es->asm_base = 0;
++    es->scan_pos = 0;
++    es->audio_frame_len = 0;
++    es->mark_head = es->mark_count = 0;
++    es->have_last_pts = 0;
++    es->delivered = 0;
++}
++
++s32 cellDmuxSetStream(u32 demuxerHandle, u32 streamAddress, u32 streamSize,
++                      b8 discontinuity, u64 userData)
++{
++    DmuxSlot* d = dmux_slot(demuxerHandle);
++    if (!d)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    if (discontinuity)
++        cellDmuxResetStream(demuxerHandle);
++
++    d->user_data = userData;
++
++    while (streamSize) {
++        u32 n = streamSize > 0x100000 ? 0x100000 : streamSize;
++        if (!streamAddress || !dmux_pending_reserve(d, n))
++            return (s32)CELL_DMUX_ERROR_FATAL;
++        memcpy(d->pending + d->pending_len, vm_ptr8(streamAddress), n);
++        d->pending_len += n;
++        streamAddress += n;
++        streamSize -= n;
++        dmux_process(d);
++    }
++
++    dmux_notify(d, demuxerHandle, CELL_DMUX_MSG_TYPE_DEMUX_DONE);
+     return CELL_OK;
+ }
+ 
+-s32 cellDmuxResetStream(CellDmuxHandle handle)
+-{
+-    printf("[cellDmux] ResetStream(handle=%u)\n", handle);
+-
+-    if (handle >= CELL_DMUX_MAX_HANDLES || !s_dmux[handle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    /* Clear pending AUs from all ES handles and reset stream tracking */
+-    for (int i = 0; i < CELL_DMUX_MAX_ES; i++) {
+-        if (s_es[i].in_use && s_es[i].dmuxId == handle)
+-            s_es[i].hasAu = 0;
+-    }
+-    s_dmux[handle].streamAddr = 0;
+-    s_dmux[handle].streamSize = 0;
+-    s_dmux[handle].auSeqNo = 0;
+-
++s32 cellDmuxResetStream(u32 demuxerHandle)
++{
++    DmuxSlot* d = dmux_slot(demuxerHandle);
++    if (!d)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    d->pending_len = 0;
++    d->started = 0;
++    for (u32 i = 0; i < CELL_DMUX_MAX_ES; i++)
++        if (s_es[i].in_use && s_es[i].dmux_index == demuxerHandle - 1)
++            dmux_reset_es_stream(&s_es[i]);
+     return CELL_OK;
+ }
+ 
+-s32 cellDmuxResetStreamAndWaitDone(CellDmuxHandle handle)
+-{
+-    return cellDmuxResetStream(handle);
++s32 cellDmuxResetStreamAndWaitDone(u32 demuxerHandle)
++{
++    return cellDmuxResetStream(demuxerHandle);
+ }
+ 
+ /* ---------------------------------------------------------------------------
+  * AU retrieval
+  * -----------------------------------------------------------------------*/
+-
+-s32 cellDmuxGetAu(CellDmuxEsHandle esHandle, CellDmuxAuInfo** auInfo, u32* auInfoNum)
+-{
+-    if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    if (!s_es[esHandle].hasAu)
++static u32 dmux_fallback_ea(u32 es_index, u32 size)
++{
++    if (es_index >= DMUX_AU_SLOTS || size > DMUX_AU_SLOT_SIZE)
++        return 0;
++    u32 ea = VM_HLE_INJECT_BASE + DMUX_FALLBACK_OFF +
++             es_index * DMUX_AU_SLOT_SIZE;
++    if (!(s_fallback_committed & (1u << es_index))) {
++        if (vm_commit(ea, DMUX_AU_SLOT_SIZE) != 0)
++            return 0;
++        s_fallback_committed |= 1u << es_index;
++    }
++    return ea;
++}
++
++static void dmux_write_au_info(DmuxEs* es, u32 info_ea, u32 addr, u32 size,
++                               u32 max_size, const DmuxReadyAu* au)
++{
++    vm_write32(info_ea + 0x00, addr);
++    vm_write32(info_ea + 0x04, size);
++    vm_write32(info_ea + 0x08, max_size);
++    vm_write8 (info_ea + 0x0C, au->is_rap);
++    vm_write8 (info_ea + 0x0D, 0);
++    vm_write8 (info_ea + 0x0E, 0);
++    vm_write8 (info_ea + 0x0F, 0);
++    vm_write64(info_ea + 0x10, au->user_data);
++    vm_write32(info_ea + 0x18, (u32)(au->pts >> 32));
++    vm_write32(info_ea + 0x1C, (u32)au->pts);
++    vm_write32(info_ea + 0x20, (u32)(au->dts >> 32));
++    vm_write32(info_ea + 0x24, (u32)au->dts);
++    (void)es;
++}
++
++s32 cellDmuxGetAu(u32 esHandle, u32* auInfo, u32* auSpecificInfo)
++{
++    DmuxEs* es = dmux_es_slot(esHandle);
++    u32 out_ea = (u32)(uintptr_t)auInfo;
++    u32 spec_ea = (u32)(uintptr_t)auSpecificInfo;
++    u32 dst, max_size, info_ea;
++
++    if (!es || !out_ea)
++        return (s32)CELL_DMUX_ERROR_ARG;
++    if (es->delivered)
++        return (s32)CELL_DMUX_ERROR_BUSY;
++    if (!es->q_count)
+         return (s32)CELL_DMUX_ERROR_EMPTY;
+ 
+-    if (auInfo)
+-        *auInfo = &s_es[esHandle].currentAu;
+-    if (auInfoNum)
+-        vm_write32((u32)(uintptr_t)auInfoNum, (u32)1);
+-
++    DmuxReadyAu* au = &es->q[es->q_head];
++    if (es->mem_addr && es->mem_size >= au->size) {
++        dst = es->mem_addr;
++        max_size = es->mem_size;
++    } else {
++        dst = dmux_fallback_ea(es->index, au->size);
++        max_size = DMUX_AU_SLOT_SIZE;
++    }
++    if (!dst) {
++        printf("[cellDmux] ES %u: no AU buffer for %u bytes\n",
++               es->index, au->size);
++        return (s32)CELL_DMUX_ERROR_FATAL;
++    }
++
++    memcpy(vm_ptr8(dst), au->data, au->size);
++    dmux_scratch_init();
++    info_ea = DMUX_INFO_EA(es->index);
++    dmux_write_au_info(es, info_ea, dst, au->size, max_size, au);
++
++    vm_write32(out_ea, info_ea);
++    if (spec_ea)
++        vm_write32(spec_ea, 0);
++
++    free(au->data);
++    au->data = NULL;
++    es->q_head = (es->q_head + 1) % DMUX_AU_QUEUE;
++    es->q_count--;
++    es->q_bytes -= au->size;
++    es->delivered = 1;
++    es->delivered_addr = dst;
++    es->delivered_size = au->size;
+     return CELL_OK;
+ }
+ 
+-s32 cellDmuxPeekAu(CellDmuxEsHandle esHandle, CellDmuxAuInfo** auInfo, u32* auInfoNum)
+-{
+-    return cellDmuxGetAu(esHandle, auInfo, auInfoNum);
+-}
+-
+-s32 cellDmuxReleaseAu(CellDmuxEsHandle esHandle)
+-{
+-    if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    s_es[esHandle].hasAu = 0;
++s32 cellDmuxGetAuEx(u32 esHandle, u32* auInfoEx, u32* auSpecificInfo)
++{
++    return cellDmuxGetAu(esHandle, auInfoEx, auSpecificInfo);
++}
++
++s32 cellDmuxPeekAu(u32 esHandle, u32* auInfo, u32* auSpecificInfo)
++{
++    return cellDmuxGetAu(esHandle, auInfo, auSpecificInfo);
++}
++
++s32 cellDmuxReleaseAu(u32 esHandle)
++{
++    DmuxEs* es = dmux_es_slot(esHandle);
++    if (!es)
++        return (s32)CELL_DMUX_ERROR_ARG;
++    if (!es->delivered)
++        return (s32)CELL_DMUX_ERROR_EMPTY;
++    es->delivered = 0;
++    es->delivered_addr = 0;
++    es->delivered_size = 0;
+     return CELL_OK;
+ }
+ 
+-s32 cellDmuxFlushEs(CellDmuxEsHandle esHandle)
+-{
+-    printf("[cellDmux] FlushEs(es=%u)\n", esHandle);
+-
+-    if (esHandle >= CELL_DMUX_MAX_ES || !s_es[esHandle].in_use)
+-        return (s32)CELL_DMUX_ERROR_ARG;
+-
+-    s_es[esHandle].hasAu = 0;
+-
+-    if (s_es[esHandle].esCbFunc)
+-        s_es[esHandle].esCbFunc(s_es[esHandle].dmuxId, esHandle,
+-                                 CELL_DMUX_ES_MSG_TYPE_FLUSH_DONE,
+-                                 0, s_es[esHandle].esCbArg);
+-
++s32 cellDmuxFlushEs(u32 esHandle)
++{
++    DmuxEs* es = dmux_es_slot(esHandle);
++    if (!es)
++        return (s32)CELL_DMUX_ERROR_ARG;
++
++    if (es->coding == 0x1B) {
++        if (es->asm_len >= 5)
++            dmux_finalize_video(es, es->asm_len);
++    } else {
++        dmux_scan_audio(es);
++        if (es->audio_frame_len && es->asm_len >= es->audio_frame_len)
++            dmux_finalize_audio(es, es->audio_frame_len);
++    }
++    dmux_es_notify(es, CELL_DMUX_ES_MSG_TYPE_FLUSH_DONE);
+     return CELL_OK;
+ }
++
++s32 cellDmuxResetEs(u32 esHandle)
++{
++    DmuxEs* es = dmux_es_slot(esHandle);
++    if (!es)
++        return (s32)CELL_DMUX_ERROR_ARG;
++    dmux_reset_es_stream(es);
++    return CELL_OK;
++}
+diff --git a/third_party/ps3recomp/libs/codec/cellAdec.h b/third_party/ps3recomp/libs/codec/cellAdec.h
+--- a/third_party/ps3recomp/libs/codec/cellAdec.h
++++ b/third_party/ps3recomp/libs/codec/cellAdec.h
+@@ -123,6 +123,13 @@
+ s32 cellAdecQueryAttr(const CellAdecType* type, void* attr);
+ s32 cellAdecOpen(const CellAdecType* type, const CellAdecResource* res,
+                  const CellAdecCb* cb, CellAdecHandle* handle);
++/* GT6 imports only the Ex/Ext forms.  They take the same arguments; the
++ * difference is the SPURS resource in the guest's resource struct, which the
++ * host-side decoder does not use. */
++s32 cellAdecOpenEx(const CellAdecType* type, const CellAdecResource* res,
++                   const CellAdecCb* cb, CellAdecHandle* handle);
++s32 cellAdecOpenExt(const CellAdecType* type, const CellAdecResource* res,
++                    const CellAdecCb* cb, CellAdecHandle* handle);
+ s32 cellAdecClose(CellAdecHandle handle);
+ 
+ s32 cellAdecStartSeq(CellAdecHandle handle, void* param);
+diff --git a/third_party/ps3recomp/libs/codec/cellAdec.c b/third_party/ps3recomp/libs/codec/cellAdec.c
+--- a/third_party/ps3recomp/libs/codec/cellAdec.c
++++ b/third_party/ps3recomp/libs/codec/cellAdec.c
+@@ -171,6 +171,18 @@
+         }
+     }
+     return (s32)CELL_ADEC_ERROR_BUSY;
++}
++
++s32 cellAdecOpenEx(const CellAdecType* type, const CellAdecResource* res,
++                   const CellAdecCb* cb, CellAdecHandle* handle)
++{
++    return cellAdecOpen(type, res, cb, handle);
++}
++
++s32 cellAdecOpenExt(const CellAdecType* type, const CellAdecResource* res,
++                    const CellAdecCb* cb, CellAdecHandle* handle)
++{
++    return cellAdecOpen(type, res, cb, handle);
+ }
+ 
+ s32 cellAdecClose(CellAdecHandle handle)
+diff --git a/gt6/src/gen/ppu_hle_nids.cpp b/gt6/src/gen/ppu_hle_nids.cpp
+--- a/gt6/src/gen/ppu_hle_nids.cpp
++++ b/gt6/src/gen/ppu_hle_nids.cpp
+@@ -3,6 +3,8 @@
+ extern "C" {
+     void cellAdecQueryAttr(void);
+     void cellAdecOpen(void);
++    void cellAdecOpenEx(void);
++    void cellAdecOpenExt(void);
+     void cellAdecClose(void);
+     void cellAdecStartSeq(void);
+     void cellAdecEndSeq(void);
+@@ -99,13 +101,20 @@
+     void cellDaisyPipeGetCount(void);
+     void cellDaisyPipeGetFreeCount(void);
+     void cellDmuxOpen(void);
++    void cellDmuxOpenEx(void);
+     void cellDmuxClose(void);
++    void cellDmuxQueryAttr(void);
++    void cellDmuxQueryAttr2(void);
++    void cellDmuxQueryEsAttr(void);
++    void cellDmuxQueryEsAttr2(void);
+     void cellDmuxEnableEs(void);
+     void cellDmuxDisableEs(void);
+     void cellDmuxSetStream(void);
+     void cellDmuxResetStream(void);
+     void cellDmuxResetStreamAndWaitDone(void);
++    void cellDmuxResetEs(void);
+     void cellDmuxGetAu(void);
++    void cellDmuxGetAuEx(void);
+     void cellDmuxPeekAu(void);
+     void cellDmuxReleaseAu(void);
+     void cellDmuxFlushEs(void);
+@@ -510,6 +519,10 @@
+     void cellPadGetCapabilityInfo(void);
+     void cellPadSetActDirect(void);
+     void cellPadClearBuf(void);
++    void cellPamfGetHeaderSize(void);
++    void cellPamfGetHeaderSize2(void);
++    void cellPamfGetStreamOffsetAndSize(void);
++    void cellPamfVerify(void);
+     void cellPamfReaderInitialize(void);
+     void cellPamfReaderGetPresentationStartTime(void);
+     void cellPamfReaderGetPresentationEndTime(void);
+@@ -518,12 +531,20 @@
+     void cellPamfReaderGetNumberOfSpecificStreams(void);
+     void cellPamfReaderSetStreamWithType(void);
+     void cellPamfReaderSetStreamWithTypeAndChannel(void);
++    void cellPamfReaderSetStreamWithTypeAndIndex(void);
+     void cellPamfReaderSetStreamWithIndex(void);
+     void cellPamfReaderGetStreamInfo(void);
+     void cellPamfReaderGetStreamIndex(void);
++    void cellPamfReaderGetStreamTypeAndChannel(void);
++    void cellPamfReaderGetEsFilterId(void);
+     void cellPamfStreamTypeToEsFilterId(void);
+     void cellPamfReaderGetNumberOfEp(void);
+     void cellPamfReaderGetEp(void);
++    void cellPamfReaderGetEpWithIndex(void);
++    void cellPamfReaderGetEpIteratorWithIndex(void);
++    void cellPamfReaderGetEpIteratorWithTimeStamp(void);
++    void cellPamfEpIteratorGetEp(void);
++    void cellPamfEpIteratorMove(void);
+     void cellPhotoExportInit(void);
+     void cellPhotoExportEnd(void);
+     void cellPhotoExportStart(void);
+@@ -1224,6 +1245,8 @@
+ extern "C" void ppu_hle_register_all(void) {
+     ps3_hle_register(0x7E4A4A49u, "cellAdecQueryAttr", (void*)cellAdecQueryAttr);
+     ps3_hle_register(0xD00A6988u, "cellAdecOpen", (void*)cellAdecOpen);
++    ps3_hle_register(0x8B5551A4u, "cellAdecOpenEx", (void*)cellAdecOpenEx);
++    ps3_hle_register(0xDF982D2Cu, "cellAdecOpenExt", (void*)cellAdecOpenExt);
+     ps3_hle_register(0x847D2380u, "cellAdecClose", (void*)cellAdecClose);
+     ps3_hle_register(0x487B613Eu, "cellAdecStartSeq", (void*)cellAdecStartSeq);
+     ps3_hle_register(0xE2EA549Bu, "cellAdecEndSeq", (void*)cellAdecEndSeq);
+@@ -1320,13 +1343,20 @@
+     ps3_hle_register(0x01DFAB5Fu, "cellDaisyPipeGetCount", (void*)cellDaisyPipeGetCount);
+     ps3_hle_register(0x93F996CDu, "cellDaisyPipeGetFreeCount", (void*)cellDaisyPipeGetFreeCount);
+     ps3_hle_register(0x68492DE9u, "cellDmuxOpen", (void*)cellDmuxOpen);
++    ps3_hle_register(0xF6C23560u, "cellDmuxOpenEx", (void*)cellDmuxOpenEx);
+     ps3_hle_register(0x8C692521u, "cellDmuxClose", (void*)cellDmuxClose);
++    ps3_hle_register(0xA2D4189Bu, "cellDmuxQueryAttr", (void*)cellDmuxQueryAttr);
++    ps3_hle_register(0x3F76E3CDu, "cellDmuxQueryAttr2", (void*)cellDmuxQueryAttr2);
++    ps3_hle_register(0x02170D1Au, "cellDmuxQueryEsAttr", (void*)cellDmuxQueryEsAttr);
++    ps3_hle_register(0x52911BCFu, "cellDmuxQueryEsAttr2", (void*)cellDmuxQueryEsAttr2);
+     ps3_hle_register(0x7B56DC3Fu, "cellDmuxEnableEs", (void*)cellDmuxEnableEs);
+     ps3_hle_register(0x05371C8Du, "cellDmuxDisableEs", (void*)cellDmuxDisableEs);
+     ps3_hle_register(0x04E7499Fu, "cellDmuxSetStream", (void*)cellDmuxSetStream);
+     ps3_hle_register(0x5D345DE9u, "cellDmuxResetStream", (void*)cellDmuxResetStream);
+     ps3_hle_register(0xCCFF1284u, "cellDmuxResetStreamAndWaitDone", (void*)cellDmuxResetStreamAndWaitDone);
++    ps3_hle_register(0x21D424F0u, "cellDmuxResetEs", (void*)cellDmuxResetEs);
+     ps3_hle_register(0x42C716B5u, "cellDmuxGetAu", (void*)cellDmuxGetAu);
++    ps3_hle_register(0x2C9A5857u, "cellDmuxGetAuEx", (void*)cellDmuxGetAuEx);
+     ps3_hle_register(0x2750C5E0u, "cellDmuxPeekAu", (void*)cellDmuxPeekAu);
+     ps3_hle_register(0x24EA6474u, "cellDmuxReleaseAu", (void*)cellDmuxReleaseAu);
+     ps3_hle_register(0xEBB3B2BDu, "cellDmuxFlushEs", (void*)cellDmuxFlushEs);
+@@ -1731,6 +1761,10 @@
+     ps3_hle_register(0xDBF4C59Cu, "cellPadGetCapabilityInfo", (void*)cellPadGetCapabilityInfo);
+     ps3_hle_register(0xF65544EEu, "cellPadSetActDirect", (void*)cellPadSetActDirect);
+     ps3_hle_register(0x0D5F2C14u, "cellPadClearBuf", (void*)cellPadClearBuf);
++    ps3_hle_register(0xCA8181C1u, "cellPamfGetHeaderSize", (void*)cellPamfGetHeaderSize);
++    ps3_hle_register(0x90FC9A59u, "cellPamfGetHeaderSize2", (void*)cellPamfGetHeaderSize2);
++    ps3_hle_register(0x44F5C9E3u, "cellPamfGetStreamOffsetAndSize", (void*)cellPamfGetStreamOffsetAndSize);
++    ps3_hle_register(0xD1A40EF4u, "cellPamfVerify", (void*)cellPamfVerify);
+     ps3_hle_register(0xB8436EE5u, "cellPamfReaderInitialize", (void*)cellPamfReaderInitialize);
+     ps3_hle_register(0x4DE501B1u, "cellPamfReaderGetPresentationStartTime", (void*)cellPamfReaderGetPresentationStartTime);
+     ps3_hle_register(0xF61609D6u, "cellPamfReaderGetPresentationEndTime", (void*)cellPamfReaderGetPresentationEndTime);
+@@ -1739,12 +1773,20 @@
+     ps3_hle_register(0xD0230671u, "cellPamfReaderGetNumberOfSpecificStreams", (void*)cellPamfReaderGetNumberOfSpecificStreams);
+     ps3_hle_register(0xB1DE0854u, "cellPamfReaderSetStreamWithType", (void*)cellPamfReaderSetStreamWithType);
+     ps3_hle_register(0x03FD2CAAu, "cellPamfReaderSetStreamWithTypeAndChannel", (void*)cellPamfReaderSetStreamWithTypeAndChannel);
++    ps3_hle_register(0x28B4E2C1u, "cellPamfReaderSetStreamWithTypeAndIndex", (void*)cellPamfReaderSetStreamWithTypeAndIndex);
+     ps3_hle_register(0x461534B4u, "cellPamfReaderSetStreamWithIndex", (void*)cellPamfReaderSetStreamWithIndex);
+     ps3_hle_register(0x67FD273Bu, "cellPamfReaderGetStreamInfo", (void*)cellPamfReaderGetStreamInfo);
+     ps3_hle_register(0x041CC708u, "cellPamfReaderGetStreamIndex", (void*)cellPamfReaderGetStreamIndex);
++    ps3_hle_register(0x9AB20793u, "cellPamfReaderGetStreamTypeAndChannel", (void*)cellPamfReaderGetStreamTypeAndChannel);
++    ps3_hle_register(0x71DF326Au, "cellPamfReaderGetEsFilterId", (void*)cellPamfReaderGetEsFilterId);
+     ps3_hle_register(0x01067E22u, "cellPamfStreamTypeToEsFilterId", (void*)cellPamfStreamTypeToEsFilterId);
+     ps3_hle_register(0xD9EA3457u, "cellPamfReaderGetNumberOfEp", (void*)cellPamfReaderGetNumberOfEp);
+     ps3_hle_register(0xD9CDB145u, "cellPamfReaderGetEp", (void*)cellPamfReaderGetEp);
++    ps3_hle_register(0xFBE551D3u, "cellPamfReaderGetEpWithIndex", (void*)cellPamfReaderGetEpWithIndex);
++    ps3_hle_register(0xE8586EC6u, "cellPamfReaderGetEpIteratorWithIndex", (void*)cellPamfReaderGetEpIteratorWithIndex);
++    ps3_hle_register(0x439FBA17u, "cellPamfReaderGetEpIteratorWithTimeStamp", (void*)cellPamfReaderGetEpIteratorWithTimeStamp);
++    ps3_hle_register(0x1ABEB9D6u, "cellPamfEpIteratorGetEp", (void*)cellPamfEpIteratorGetEp);
++    ps3_hle_register(0x50B83205u, "cellPamfEpIteratorMove", (void*)cellPamfEpIteratorMove);
+     ps3_hle_register(0x3C5252A9u, "cellPhotoExportInit", (void*)cellPhotoExportInit);
+     ps3_hle_register(0x4CDB0C01u, "cellPhotoExportEnd", (void*)cellPhotoExportEnd);
+     ps3_hle_register(0xE6039A5Au, "cellPhotoExportStart", (void*)cellPhotoExportStart);

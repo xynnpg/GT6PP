@@ -46,6 +46,12 @@ void     vm_write64(uint64_t addr, uint64_t val);
 uint8_t  vm_read8(uint64_t addr);
 uint32_t vm_read32(uint64_t addr);
 }
+/* Generated MENU::mMenuGameObjectManager::processEventLoop state machine
+ * (guest 0x568658).  It has C++ linkage, like every function in the lifted
+ * tree; see gt6/generated/ppu_recomp.h. */
+void func_00568658(ppu_context* ctx);
+void func_005EBEBC(ppu_context* ctx);
+void func_005FA6C8(ppu_context* ctx);
 
 /* -------------------------------------------------------------------------
  * Boot-script stream override.
@@ -556,6 +562,9 @@ static int gt6_pfs_read_override(ppu_context* ctx)
          * FileObject pointer at FileStream+0x44 (= reader+0x74). */
         const uint32_t file = reader ? vm_read32((uint64_t)reader + 0x74u) : 0;
         s = gt6_pfs_find_file(file);
+        if (!s && gt6_pfs_trace())
+            fprintf(stderr, "[pfsov-miss] reader=0x%08X file=0x%08X\n",
+                    (unsigned)reader, (unsigned)file);
     }
     if (!s || !s->data) return 0;
 
@@ -736,6 +745,11 @@ extern "C" int gt6_pfs_stream_read_override(ppu_context* ctx)
 
     const uint32_t file = vm_read32((uint64_t)stream + 0x44u);
     Gt6PfsSlot* s = gt6_pfs_find_file(file);
+    /* PFS-cache files are keyed by the HFileReader base (stream-0x30), not by
+     * the FileStream's FileObject pointer.  Fall back to that key so stream
+     * reads on a cached file complete synchronously instead of falling through
+     * to the async host device. */
+    if (!s) s = gt6_pfs_find(stream >= 0x30u ? stream - 0x30u : 0u);
     if (!s || !s->data) return 0;
 
     const uint32_t out = vm_read32((uint64_t)req + 0u);
@@ -773,7 +787,9 @@ extern "C" int gt6_pfs_stream_seek_override(ppu_context* ctx)
     const uint32_t stream = (uint32_t)ctx->gpr[3];
     if (!stream) return 0;
 
-    Gt6PfsSlot* s = gt6_pfs_find_file(vm_read32((uint64_t)stream + 0x44u));
+    uint32_t file = vm_read32((uint64_t)stream + 0x44u);
+    Gt6PfsSlot* s = gt6_pfs_find_file(file);
+    if (!s) s = gt6_pfs_find(stream >= 0x30u ? stream - 0x30u : 0u);
     if (!s || !s->data) return 0;
 
     const int32_t origin = (int32_t)ctx->gpr[4];
@@ -802,7 +818,9 @@ extern "C" int gt6_pfs_stream_tell_override(ppu_context* ctx)
     const uint32_t stream = (uint32_t)ctx->gpr[3];
     if (!stream) return 0;
 
-    Gt6PfsSlot* s = gt6_pfs_find_file(vm_read32((uint64_t)stream + 0x44u));
+    uint32_t file = vm_read32((uint64_t)stream + 0x44u);
+    Gt6PfsSlot* s = gt6_pfs_find_file(file);
+    if (!s) s = gt6_pfs_find(stream >= 0x30u ? stream - 0x30u : 0u);
     if (!s || !s->data) return 0;
     s->stamp = ++g_pfs_stamp;
 
@@ -812,6 +830,17 @@ extern "C" int gt6_pfs_stream_tell_override(ppu_context* ctx)
 
     ctx->gpr[3] = s->pos;
     return 1;
+}
+
+extern "C" int gt6_guest_file_vtable_valid(uint32_t object_ea)
+{
+    if (!object_ea) return 0;
+    const uint32_t vtable = vm_read32((uint64_t)object_ea);
+    if (vtable < 0x01000000u || vtable >= 0x02000000u) return 0;
+    const uint32_t open_opd = vm_read32((uint64_t)vtable + 0x20u);
+    const uint32_t close_opd = vm_read32((uint64_t)vtable + 0x24u);
+    return (open_opd >= 0x01000000u && open_opd < 0x02000000u) &&
+           (close_opd >= 0x01000000u && close_opd < 0x02000000u);
 }
 
 extern "C" void gt6_script_path_hint(uint32_t reader_ea, uint32_t str_ea)
@@ -1332,11 +1361,6 @@ extern "C" void gt6_mgom_vector_clear_probe(ppu_context* ctx)
  * not consumed; if it runs, read the base/name and the following PFS opens. */
 extern "C" void gt6_project_load_probe(ppu_context* ctx)
 {
-    if (!gt6_boot_trace()) return;
-    {
-        static int n = 0;
-        if (n++ >= 16) return;
-    }
     const uint32_t base = (uint32_t)ctx->gpr[4];
     const uint32_t name = (uint32_t)ctx->gpr[5];
     char sb[96]; sb[0] = 0;
@@ -1355,19 +1379,36 @@ extern "C" void gt6_project_load_probe(ppu_context* ctx)
             "[GT6] project load this=0x%08X base=0x%08X '%s' "
             "name=0x%08X '%s'\n",
             (unsigned)ctx->gpr[3], base, sb, name, sn);
+    if (!gt6_boot_trace()) return;
+    {
+        static int n = 0;
+        if (n++ >= 16) return;
+    }
 }
 
 /* Pending-project setter `0x568C94`: the context stores the name at +0x50 and
  * raises the pending flag at +0x48.  It does not open any file itself. */
+static uint32_t g_menu_manager;
+static uint32_t g_menu_project_name;
+
 extern "C" void gt6_menu_project_request(ppu_context* ctx)
 {
+    const uint32_t obj  = (uint32_t)ctx->gpr[3];
+    const uint32_t name = (uint32_t)ctx->gpr[4];
+    g_menu_manager = obj;
+    if (name) {
+        g_menu_project_name = name;
+        uint32_t indirect = vm_read32((uint64_t)name);
+        char text[GT6_PFS_PATH_MAX];
+        if (gt6_guest_ptr_ok(indirect) &&
+            gt6_read_guest_cstr(indirect, text, sizeof text))
+            g_menu_project_name = indirect;
+    }
     if (!gt6_boot_trace()) return;
     {
         static int n = 0;
         if (n++ >= 64) return;
     }
-    const uint32_t obj  = (uint32_t)ctx->gpr[3];
-    const uint32_t name = (uint32_t)ctx->gpr[4];
     /* r4 is an HValue, not necessarily a C string; the `MGOM.start` probe
      * above already prints the raw 'boot' argument.  Log the two object words
      * only, so this cannot read a vtable as text. */
@@ -1381,6 +1422,69 @@ extern "C" void gt6_menu_project_request(ppu_context* ctx)
             gt6_guest_ptr_ok(obj) ? (unsigned)vm_read32((uint64_t)obj + 0x48u) : 0u);
 }
 
+/* Pending-project consumer pump.
+ *
+ * `MGOM.start(name)` (0x568C94) only stores the name at manager+0x50 and sets
+ * manager+0x48 = 1.  The engine-side consumer is the menu manager's
+ * `processEventLoop` game-object callback: the cursor loader 0x56B948
+ * registers OPD 0x14BF800 (0x568A0C -> 0x568658) through 0xA14824 with
+ * arg=manager during MGOM.initialize.  The native port does not run the
+ * pdiext game-object update loop, so that callback never fires and the flag
+ * stays 1.  The menu worker thread (0xA12170) is alive but only polls its own
+ * empty job queue (`arg+0x80..0x88`), not manager+0x18.
+ *
+ * Pump the registered callback from the worker loop.  This calls the real
+ * state machine: state 1 formats `<project_root>/<name>/<name>.mproject`
+ * through 0x5FA6C8 and opens it with 0x5FA338; states 3/5 complete the
+ * transition and clear manager+0x48.  No guest state is written here.
+ */
+extern "C" void gt6_menu_project_tick(ppu_context* ctx, uint32_t worker_arg)
+{
+    const uint32_t mgr = g_menu_manager;
+    if (mgr == 0u) return;
+    /* The worker sets arg+0x94 to 0 when it is shutting down; do not touch
+     * the manager after MGOM.finalize has torn it down. */
+    if (gt6_guest_ptr_ok(worker_arg) &&
+        vm_read8((uint64_t)worker_arg + 0x94u) == 0u)
+        return;
+
+    const uint32_t state = vm_read32((uint64_t)mgr + 0x48u);
+    if (state == 0u) {
+        g_menu_manager = 0u;
+        return;
+    }
+
+    if (state > 6u) return;   /* transient/garbage; retry next iteration */
+    /* MGOM.start("boot") stores "boot" at manager+0x50, but that guest string
+     * can be freed before the pump runs (the pump lives on the worker thread).
+     * Restore the captured name pointer so the loader formats the real path
+     * instead of '/projects/gt6//.mproject'. */
+    if (g_menu_project_name) {
+        uint32_t cur = vm_read32((uint64_t)mgr + 0x50u);
+        char text[GT6_PFS_PATH_MAX];
+        if (!gt6_guest_ptr_ok(cur) ||
+            !gt6_read_guest_cstr(cur, text, sizeof text))
+            vm_write32((uint64_t)mgr + 0x50u, g_menu_project_name);
+    }
+
+    if (gt6_boot_trace())
+        fprintf(stderr, "[GT6] menu pump manager=0x%08X state=%u nameptr=0x%08X\n",
+                mgr, state, (unsigned)vm_read32((uint64_t)mgr + 0x50u));
+
+    /* The state machine is a normal generated function; save the worker's
+     * register file because the hook is injected in the middle of its loop. */
+    ppu_context saved = *ctx;
+    ctx->gpr[3] = mgr;
+    func_00568658(ctx);
+    *ctx = saved;
+
+    if (gt6_boot_trace() && gt6_guest_ptr_ok(mgr))
+        fprintf(stderr, "[GT6] menu pump manager=0x%08X state_after=%u flag4C=%u load4D=%u\n",
+                mgr, (unsigned)vm_read32((uint64_t)mgr + 0x48u),
+                (unsigned)vm_read8((uint64_t)mgr + 0x4Cu),
+                (unsigned)vm_read8((uint64_t)mgr + 0x4Du));
+}
+
 extern "C" void gt6_hle_overrides(void)
 {
     ps3_hle_register_ctx(0xC765B995u, "cellSpursGetWorkloadFlag",
@@ -1392,3 +1496,4 @@ extern "C" void gt6_hle_overrides(void)
     ps3_hle_register_ctx(0x5C832BD7u, "cellUsbdSetThreadPriority2",
                          gt6_cellUsbdSetThreadPriority2);
 }
+

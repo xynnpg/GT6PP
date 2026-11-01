@@ -1,0 +1,194 @@
+diff --git a/gt6/src/stubs.cpp b/gt6/src/stubs.cpp
+index aa5e93b..4fe901f 100644
+--- a/gt6/src/stubs.cpp
++++ b/gt6/src/stubs.cpp
+@@ -45,8 +45,14 @@ void     vm_write32(uint64_t addr, uint32_t val);
+ void     vm_write64(uint64_t addr, uint64_t val);
+ uint8_t  vm_read8(uint64_t addr);
+ uint32_t vm_read32(uint64_t addr);
++extern PPU_THREAD_LOCAL void (*g_trampoline_fn)(void*);
+ }
+ 
++/* Generated MENU::mMenuGameObjectManager::processEventLoop state machine
++ * (guest 0x568658).  It has C++ linkage, like every function in the lifted
++ * tree; see gt6/generated/ppu_recomp.h. */
++void func_00568658(ppu_context* ctx);
++
+ /* -------------------------------------------------------------------------
+  * Boot-script stream override.
+  *
+@@ -1359,15 +1365,18 @@ extern "C" void gt6_project_load_probe(ppu_context* ctx)
+ 
+ /* Pending-project setter `0x568C94`: the context stores the name at +0x50 and
+  * raises the pending flag at +0x48.  It does not open any file itself. */
++static uint32_t g_menu_manager;
++
+ extern "C" void gt6_menu_project_request(ppu_context* ctx)
+ {
++    const uint32_t obj  = (uint32_t)ctx->gpr[3];
++    const uint32_t name = (uint32_t)ctx->gpr[4];
++    g_menu_manager = obj;
+     if (!gt6_boot_trace()) return;
+     {
+         static int n = 0;
+         if (n++ >= 64) return;
+     }
+-    const uint32_t obj  = (uint32_t)ctx->gpr[3];
+-    const uint32_t name = (uint32_t)ctx->gpr[4];
+     /* r4 is an HValue, not necessarily a C string; the `MGOM.start` probe
+      * above already prints the raw 'boot' argument.  Log the two object words
+      * only, so this cannot read a vtable as text. */
+@@ -1381,6 +1390,62 @@ extern "C" void gt6_menu_project_request(ppu_context* ctx)
+             gt6_guest_ptr_ok(obj) ? (unsigned)vm_read32((uint64_t)obj + 0x48u) : 0u);
+ }
+ 
++/* Pending-project consumer pump.
++ *
++ * `MGOM.start(name)` (0x568C94) only stores the name at manager+0x50 and sets
++ * manager+0x48 = 1.  The engine-side consumer is the menu manager's
++ * `processEventLoop` game-object callback: the cursor loader 0x56B948
++ * registers OPD 0x14BF800 (0x568A0C -> 0x568658) through 0xA14824 with
++ * arg=manager during MGOM.initialize.  The native port does not run the
++ * pdiext game-object update loop, so that callback never fires and the flag
++ * stays 1.  The menu worker thread (0xA12170) is alive but only polls its own
++ * empty job queue (`arg+0x80..0x88`), not manager+0x18.
++ *
++ * Pump the registered callback from the worker loop.  This calls the real
++ * state machine: state 1 formats `<project_root>/<name>/<name>.mproject`
++ * through 0x5FA6C8 and opens it with 0x5FA338; states 3/5 complete the
++ * transition and clear manager+0x48.  No guest state is written here.
++ */
++extern "C" void gt6_menu_project_tick(ppu_context* ctx, uint32_t worker_arg)
++{
++    const uint32_t mgr = g_menu_manager;
++    if (mgr == 0u) return;
++    /* The worker sets arg+0x94 to 0 when it is shutting down; do not touch
++     * the manager after MGOM.finalize has torn it down. */
++    if (gt6_guest_ptr_ok(worker_arg) &&
++        vm_read8((uint64_t)worker_arg + 0x94u) == 0u)
++        return;
++
++    const uint32_t state = vm_read32((uint64_t)mgr + 0x48u);
++    if (state == 0u) {
++        g_menu_manager = 0u;
++        return;
++    }
++    if (state > 6u) return;   /* transient/garbage; retry next iteration */
++
++    if (gt6_boot_trace())
++        fprintf(stderr, "[GT6] menu pump manager=0x%08X state=%u\n", mgr, state);
++
++    /* The state machine is a normal generated function; save the worker's
++     * register file because the hook is injected in the middle of its loop.
++     * Generated functions return through g_trampoline_fn instead of a C
++     * return, so drain that pointer exactly like DRAIN_TRAMPOLINE does. */
++    ppu_context saved = *ctx;
++    ctx->gpr[3] = mgr;
++    ctx->lr = 0x00A121ACu;   /* hook site, only for diagnostics */
++    func_00568658(ctx);
++    while (g_trampoline_fn) {
++        void (*tf)(void*) = g_trampoline_fn;
++        g_trampoline_fn = 0;
++        tf(ctx);
++    }
++    *ctx = saved;
++
++    if (gt6_boot_trace() && gt6_guest_ptr_ok(mgr))
++        fprintf(stderr, "[GT6] menu pump manager=0x%08X state_after=%u\n",
++                mgr, (unsigned)vm_read32((uint64_t)mgr + 0x48u));
++}
++
+ extern "C" void gt6_hle_overrides(void)
+ {
+     ps3_hle_register_ctx(0xC765B995u, "cellSpursGetWorkloadFlag",
+diff --git a/tools/apply_gt6_post_lift.py b/tools/apply_gt6_post_lift.py
+index 5e815d1..fe04918 100644
+--- a/tools/apply_gt6_post_lift.py
++++ b/tools/apply_gt6_post_lift.py
+@@ -174,6 +174,46 @@ def add_boot_presents_hooks(root: Path) -> int:
+     return changed
+ 
+ 
++def add_menu_project_pump(root: Path) -> int:
++    """Pump the registered menu processEventLoop callback from the worker.
++
++    MGOM.start() only queues manager+0x48/+0x50.  The real consumer is the
++    game-object-loop callback 0x568658 (OPD 0x14BF800) registered by the
++    cursor loader 0x56B948 via 0xA14824.  The native port never runs the
++    pdiext game-object update loop, so the menu worker's idle loop
++    (func_00A12170) pumps it with the manager captured at 0x568C94.
++    See docs/analysis/boot-project-handoff-fix.md.
++    """
++    path = root / "ppu_recomp_023.cpp"
++    if not path.exists():
++        print("warning: ppu_recomp_023.cpp not found; menu pump skipped",
++              file=sys.stderr)
++        return 0
++    s = path.read_text(encoding="latin-1")
++    changed = 0
++
++    inc = '#include "ppu_recomp.h"\n'
++    decl = 'extern "C" void gt6_menu_project_tick(ppu_context* ctx, uint32_t worker_arg);\n'
++    if inc in s and decl not in s:
++        s = s.replace(inc, inc + decl, 1)
++        changed += 1
++
++    label = "loc_00A121AC:\n"
++    call = "        gt6_menu_project_tick(ctx, (uint32_t)ctx->gpr[25]);\n"
++    if call in s:
++        pass
++    elif s.count(label) == 1:
++        s = s.replace(label, label + call, 1)
++        changed += 1
++    else:
++        print("warning: func_00A12170 loop label not found exactly once",
++              file=sys.stderr)
++
++    if changed:
++        path.write_text(s, encoding="latin-1")
++    return changed
++
++
+ def add_host_open_wrapper(root: Path) -> int:
+     """Wrap 0x9F8E40 so the host open is keyed by its returned FileObject.
+ 
+@@ -280,11 +320,13 @@ def main(argv: list[str]) -> int:
+     guards = add_setjmp_guards(root)
+     hooks = add_script_hooks(root)
+     boot_hooks = add_boot_presents_hooks(root)
++    pump = add_menu_project_pump(root)
+     host_open = add_host_open_wrapper(root)
+     adch = patch_adch_switch(root)
+     filedev_changes = patch_filedevice_flush(root)
+     print(f"post-lift: setjmp guards added {guards}; script hooks changed {hooks}; "
+           f"boot/presents hooks changed {boot_hooks}; "
++          f"menu pump changes {pump}; "
+           f"host-open wrappers {host_open}; "
+           f"ADCH switch changes {adch}; FileDeviceHost changes {filedev_changes}")
+     return 0
+diff --git a/tools/post_lift_fixes.py b/tools/post_lift_fixes.py
+index 416dc8d..c296591 100644
+--- a/tools/post_lift_fixes.py
++++ b/tools/post_lift_fixes.py
+@@ -61,6 +61,11 @@ BOOT_PREPARE_FUNC = "func_00A11F20"
+ BOOT_PREPARE_REQUIRED = ("gt6_menu_worker_prepare(ctx);",)
+ BOOT_LOAD_FUNC = "func_005FA338"
+ BOOT_LOAD_REQUIRED = ("gt6_project_load_probe(ctx);",)
++# docs/analysis/boot-project-handoff-fix.md: the pending request is consumed
++# by the manager's processEventLoop callback 0x568658, pumped from the worker
++# loop (func_00A12170).  Fail the relift if the pump is lost.
++BOOT_PUMP_FUNC = "func_00A12170"
++BOOT_PUMP_REQUIRED = ("gt6_menu_project_tick(ctx, (uint32_t)ctx->gpr[25]);",)
+ # Current-build MGOM constructor/vector gate probes.
+ BOOT_EXTRA = (
+     ("func_006C4EC0", "gt6_mgom_class_probe(ctx);"),
+@@ -144,7 +149,8 @@ def main(argv: list[str]) -> int:
+     # Boot/presents menu-worker hook (docs/analysis/boot-presents-fix.md).
+     for fname, required in ((BOOT_WORKER_FUNC, BOOT_WORKER_REQUIRED),
+                             (BOOT_PREPARE_FUNC, BOOT_PREPARE_REQUIRED),
+-                            (BOOT_LOAD_FUNC, BOOT_LOAD_REQUIRED)):
++                            (BOOT_LOAD_FUNC, BOOT_LOAD_REQUIRED),
++                            (BOOT_PUMP_FUNC, BOOT_PUMP_REQUIRED)):
+         n = 0
+         for path in sorted(root.glob("ppu_recomp_*.cpp")):
+             body = find_function(path.read_text(encoding="latin-1"), fname)

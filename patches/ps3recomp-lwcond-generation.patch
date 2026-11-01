@@ -1,0 +1,211 @@
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index 9cb5040..6d35826 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -17,6 +17,7 @@
+ #include <stdio.h>
+ #include <stdlib.h>
+ #include <string.h>
++#include <atomic>
+ /* win32_compat.h is <windows.h> on Windows (CRITICAL_SECTION for the real
+  * lwmutex exclusion) and the POSIX shims elsewhere -- Sleep, DWORD, QPC. */
+ #include "../platform/win32_compat.h"
+@@ -391,14 +392,37 @@ static void sys_lwmutex_unlock(ppu_context* ctx)
+ }
+ 
+ /* sys_lwcond (sysPrxForUser) — guest-side condition variable, paired with an
+- * lwmutex. The CRT and (newly) libsre's cellSpurs create/wait/signal these. Like
+- * sys_lwmutex above, model it directly in guest memory so the args stay GUEST
+- * EAs (the generic adapter would pass them raw and the C sysPrxForUser impl
+- * deref'd them as host pointers -> AV during cellSpurs init). A no-op wait is
+- * adequate here: the CRT/SPURS paths that reach us use these for one-shot init
+- * handshakes, not long-term blocking. sys_lwcond_t is 8 bytes: +0x00 u32
+- * lwmutex EA, +0x04 u32 lwcond queue id. Titles read +0x00 themselves (an
+- * lwcond whose lwmutex reads 0 is treated as invalid). */
++ * lwmutex. The CRT and libsre's cellSpurs create/wait/signal these. Model it
++ * directly in guest memory so the args stay GUEST EAs (the generic adapter
++ * would pass them raw and the C sysPrxForUser impl deref'd them as host
++ * pointers -> AV during cellSpurs init).
++ *
++ * sys_lwcond_t is 8 bytes: +0x00 u32 lwmutex EA, +0x04 u32 queue id. The
++ * queue id is the kernel identity: the guest copies the 8-byte structure
++ * around, so keying by the caller's address splits one object into two.
++ *
++ * Wake-ups use a per-queue generation counter, not a semaphore. A signal
++ * increments the generation (release) and wakes every host thread parked in
++ * WaitOnAddress on it; a wait snapshots the generation BEFORE it drops the
++ * lwmutex, so a signal that lands during the drop is seen by the re-check and
++ * cannot be lost. WaitOnAddress is capped at PS3_LWCOND_POLL_MS (default 1)
++ * so a change made through some other path is noticed as promptly as the old
++ * 1 ms sleep. The cap is also the progress guarantee for the one-shot
++ * wrappers that do not re-check (GT6 A21CBC): without it, a signal that never
++ * arrives would park the thread on an infinite wait.
++ * PS3_LWCOND_SLEEP=1 restores the old fixed sleep, PS3_LWCOND_POLL_MS
++ * overrides the cap.
++ *
++ * This is the soyjxck/ps3recomp lwcond (MIT), the implementation behind the
++ * playable Drakengard 3 port's FIOS read chains. The previous semaphore /
++ * pending-signal experiment could not bridge a completion signal that was
++ * never issued at all (GT6 menu_imagefont.bin). */
++static int lwc_trace(void)
++{
++    static int m = -1;
++    if (m < 0) { const char* e = getenv("PS3_LWCOND_TRACE"); m = (e && *e && *e != '0') ? 1 : 0; }
++    return m;
++}
+ static void sys_lwcond_create(ppu_context* ctx)
+ {
+     static uint32_t s_lwcond_id = 0x4C000000u;
+@@ -406,34 +430,142 @@ static void sys_lwcond_create(ppu_context* ctx)
+     uint32_t lwmutex = (uint32_t)ctx->gpr[4];
+     vm_write32(lwcond + 0x00, lwmutex);
+     vm_write32(lwcond + 0x04, ++s_lwcond_id);
++    if (lwc_trace()) {
++        static volatile long n = 0;
++        if (InterlockedIncrement(&n) <= 400)
++            fprintf(stderr, "[LWCOND] create tid=%llu lwcond=0x%08X qid=0x%08X lwmutex=0x%08X lr=0x%08X\n",
++                    (unsigned long long)ctx->thread_id, lwcond, s_lwcond_id,
++                    lwmutex, (unsigned)ctx->lr);
++    }
+     ctx->gpr[3] = 0;
+ }
++enum { LWC_GEN_TAB = 4096 };
++static std::atomic<uint32_t> s_lwc_gen[LWC_GEN_TAB];
++static std::atomic<uint32_t>* lwc_gen(uint32_t lwcond)
++{
++    if (!lwcond) return nullptr;
++    const uint32_t qid = vm_read32((uint64_t)lwcond + 4u);
++    return (qid & 0xFF000000u) == 0x4C000000u
++        ? &s_lwc_gen[qid & (LWC_GEN_TAB - 1)] : nullptr;
++}
++static int lwc_sleep_mode(void)
++{
++    static int m = -1;
++    if (m < 0) { const char* e = getenv("PS3_LWCOND_SLEEP"); m = (e && *e && *e != '0') ? 1 : 0; }
++    return m;
++}
++static uint32_t lwc_poll_us(void)
++{
++    static uint32_t v = 0;
++    if (!v) {
++        const char* e = getenv("PS3_LWCOND_POLL_MS");
++        v = (e && atoi(e) > 0 ? (uint32_t)atoi(e) : 1u) * 1000u;
++    }
++    return v;
++}
++static void lwc_wait(std::atomic<uint32_t>* g, uint32_t seen, uint32_t max_us)
++{
++    /* LLVM-MinGW does not export WaitOnAddress/WakeByAddressAll, so poll the
++     * generation.  The wait is capped at 1 ms by default; the guest's
++     * predicate loop re-checks either way. */
++    LARGE_INTEGER freq, start, now;
++    QueryPerformanceFrequency(&freq);
++    QueryPerformanceCounter(&start);
++    unsigned spins = 0;
++    while (g->load(std::memory_order_acquire) == seen) {
++        if (max_us) {
++            QueryPerformanceCounter(&now);
++            if ((uint64_t)(now.QuadPart - start.QuadPart) * 1000000ull /
++                    (uint64_t)freq.QuadPart >= max_us)
++                break;
++        }
++        if (++spins < 64) YieldProcessor();
++        else Sleep(0);
++    }
++}
++static void lwc_wake(ppu_context* ctx, int all)
++{
++    uint32_t lwcond = (uint32_t)ctx->gpr[3];
++    uint32_t qid = lwcond ? vm_read32((uint64_t)lwcond + 4u) : 0;
++    std::atomic<uint32_t>* g = lwc_gen(lwcond);
++    if (!g) {
++        if (lwc_trace()) {
++            static volatile long n = 0;
++            if (InterlockedIncrement(&n) <= 400)
++                fprintf(stderr, "[LWCOND] signal%s tid=%llu lwcond=0x%08X qid=0x%08X gen=unkeyed lr=0x%08X\n",
++                        all ? "_all" : "", (unsigned long long)ctx->thread_id, lwcond, qid,
++                        (unsigned)ctx->lr);
++        }
++        return;
++    }
++    g->fetch_add(1, std::memory_order_release);
++    if (lwc_trace()) {
++        static volatile long n = 0;
++        if (InterlockedIncrement(&n) <= 400)
++            fprintf(stderr, "[LWCOND] signal%s tid=%llu lwcond=0x%08X qid=0x%08X gen=%u lr=0x%08X\n",
++                    all ? "_all" : "", (unsigned long long)ctx->thread_id, lwcond, qid,
++                    g->load(std::memory_order_relaxed), (unsigned)ctx->lr);
++    }
++    /* Waiters poll the generation; no Win32 wait-address API needed. */
++}
+ static void sys_lwcond_destroy(ppu_context* ctx)    { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal(ppu_context* ctx)     { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_all(ppu_context* ctx) { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
+-/* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
+- * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
+- * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
+- * common single (non-recursive) hold. */
++static void sys_lwcond_signal(ppu_context* ctx)     { lwc_wake(ctx, 0); ctx->gpr[3] = 0; }
++static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_wake(ctx, 1); ctx->gpr[3] = 0; }
++static void sys_lwcond_signal_to(ppu_context* ctx)  { lwc_wake(ctx, 0); ctx->gpr[3] = 0; }
++/* Release the paired lwmutex, wait for a generation change (or the poll
++ * interval, or the guest's own timeout if shorter), reacquire. The guest's
++ * while(!predicate) loop re-checks. Handles the common single hold. */
+ static void sys_lwcond_wait(ppu_context* ctx)
+ {
+     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
+-    uint32_t lwmutex = vm_read32(lwcond + 0x00);
++    uint64_t timeout_us = ctx->gpr[4];
++    uint32_t lwmutex = vm_read32((uint64_t)lwcond + 0x00u);
+     struct LwmSlot* sl = lwm_slot(lwmutex);
++    std::atomic<uint32_t>* g = lwc_sleep_mode() ? nullptr : lwc_gen(lwcond);
++    uint32_t rcode = 0;
+     if (sl) {
++        /* Snapshot BEFORE dropping the lwmutex: a signal that runs between the
++         * snapshot and the release bumps the generation, and the check after
++         * the release sees it instead of sleeping through the wake. */
++        const uint32_t seen = g ? g->load(std::memory_order_acquire) : 0;
+         uint32_t own = vm_read32(lwmutex + LWM_OWNER);
+         uint32_t rc  = vm_read32(lwmutex + LWM_RECUR);
+         vm_write32(lwmutex + LWM_RECUR, 0);
+         vm_write32(lwmutex + LWM_OWNER, 0);
+         ppu_thread_note_block(ctx->thread_id);
+         lwm_release(sl);
+-        Sleep(1);
++        if (g) {
++            static volatile long n = 0;
++            int tr = lwc_trace() && InterlockedIncrement(&n) <= 400;
++            if (tr) {
++                char b[700]; int p = snprintf(b, sizeof b,
++                            "[LWCOND] wait tid=%llu lwcond=0x%08X qid=0x%08X gen=%u tmo=%llu lr=0x%08X stk:",
++                            (unsigned long long)ctx->thread_id, lwcond,
++                            vm_read32((uint64_t)lwcond + 4u), seen,
++                            (unsigned long long)timeout_us, (unsigned)ctx->lr);
++                uint32_t sp = (uint32_t)ctx->gpr[1], prev = 0; int found = 0;
++                for (uint32_t a = sp; a < sp + 0x800 && found < 14 && p < 640; a += 4) {
++                    uint32_t v = vm_read32(a);
++                    if (v >= 0x00010000u && v < 0x00F00000u && v != prev) {
++                        p += snprintf(b + p, sizeof(b) - p, " %06X", v); prev = v; found++; }
++                }
++                fprintf(stderr, "%s\n", b);
++            }
++            uint32_t max_us = lwc_poll_us();
++            if (timeout_us && timeout_us < max_us) max_us = (uint32_t)timeout_us;
++            if (g->load(std::memory_order_acquire) == seen) lwc_wait(g, seen, max_us);
++            if (tr) fprintf(stderr, "[LWCOND] woke tid=%llu lwcond=0x%08X qid=0x%08X gen=%u rc=0x%X\n",
++                            (unsigned long long)ctx->thread_id, lwcond,
++                            vm_read32((uint64_t)lwcond + 4u),
++                            g->load(std::memory_order_relaxed), rcode);
++        } else {
++            Sleep(1);
++        }
+         lwm_acquire(sl, 0);
+         vm_write32(lwmutex + LWM_OWNER, own);
+         vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
+     }
+-    ctx->gpr[3] = 0;
++    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)rcode;
+ }
+ 
+ /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.

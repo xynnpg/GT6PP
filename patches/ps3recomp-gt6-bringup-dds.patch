@@ -25,9 +25,10 @@
 +    if (!inited) {
 +        inited = 1;
 +        const char* path = getenv("GT6_BRINGUP_DDS");
-+        if (!path || !*path) return;
++        if (!path || !*path || strcmp(path, "0") == 0) return;
 +        FILE* f = fopen(path, "rb");
 +        if (!f) { fprintf(stderr, "[BRINGUP] cannot open %s%c", path, 10); return; }
++        fprintf(stderr, "[BRINGUP] diagnostic overlay (NOT game-rendered): %s%c", path, 10);
 +        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
 +        u8* d = (u8*)malloc((size_t)sz);
 +        if (!d || fread(d, 1, (size_t)sz, f) != (size_t)sz || sz < 128 || memcmp(d, "DDS ", 4)) {

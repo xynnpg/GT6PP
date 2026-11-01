@@ -64,14 +64,12 @@ draw path.
   a VP draw by itself. Only `[DRAWDIAG] vp_ucode=`, `[VP]`, and
   `[D3D12] draw_arrays` can.
 
-### 1.3 The overlay is still enabled when the variable is unset
+### 1.3 The overlay is opt-in
 
-`bringup_present()` treats `GT6_BRINGUP_DDS=0` as “off” and returns
-(`rsx_d3d12_backend.c:4594-4595`), but when the variable is **unset or empty**
-it defaults to `work/bringup/image_boot_common_notice.dds`
-(`4596`). Any run that does not explicitly set `GT6_BRINGUP_DDS=0` can pass
-`frame_check` with the notice image. `scripts/verify-real-frame.ps1:44` does
-set it to `0`; casual runs do not.
+`bringup_present()` returns when `GT6_BRINGUP_DDS` is unset, empty, or `0`.
+Only a non-empty DDS path enables the diagnostic overlay. Real-frame
+verification still sets `GT6_BRINGUP_DDS=0` explicitly as a defensive negative
+control.
 
 ## 2. What the first mapped 2D GPB draw is
 
@@ -318,7 +316,7 @@ the draw; the remaining risk is the guest FP/PSO, not the legacy PSO.
 Run with:
 
 ```powershell
-$env:GT6_BRINGUP_DDS = "0"        # mandatory; unset re-enables the notice overlay
+$env:GT6_BRINGUP_DDS = "0"        # explicit negative control; overlay is opt-in
 $env:GT6_BOOTUI_TRACE = "1"
 $env:GT6_BOOT_TRACE = "1"
 $env:PS3_VERBOSE = "1"
@@ -379,7 +377,7 @@ full-screen `epilepsy` frame.
 | “The first GPB draw is definitely `QUADS`, no VP, one texture.” | **Overclaimed.** `QUADS`/attr0/attr8 is strong static evidence from the UI batcher; the exact PresentsRoot primitive/VP/FP/blend/unit is not traced. |
 | “The GPB draw will use the dbgfont atlas path.” | **False for DXT1.** `tex_bound` is B8-only; the atlas PS is not a generic sampler. |
 | “The current backend is the first blocker.” | **Unsupported.** The latest run never reaches `main.adc`/`K/WD`; the missing boot/presents load is upstream. |
-| “The overlay is off by default.” | **Source says otherwise.** `GT6_BRINGUP_DDS` unset defaults to the notice DDS (`rsx_d3d12_backend.c:4596`); only explicit `0` disables it. |
+| “The overlay is off by default.” | **Source agrees.** `GT6_BRINGUP_DDS` must name a DDS file to enable it; unset, empty, and `0` disable it. |
 | “The 15 s GT6/©/ESRB frame is PresentsRoot.” | **Unsupported.** It predates `K/WD` and matches none of the five GPB textures; it remains unmapped (`boot-presents-check.md:365-384`). |
 | “The self-test proves the first GPB draw.” | **False.** The D3D12 self-test bypasses the FIFO/guest state and sets `fp_addr=0`; it does not exercise the guest FP+texture path (`d3d12-draw-readiness-check.md:308-330`). |
 

@@ -38,6 +38,7 @@ $src = (Resolve-Path (Join-Path $Root "gt6")).Path
 
 python -m cmake -S $src -B $build -G Ninja `
     -DCMAKE_BUILD_TYPE=Release `
+    -DGT6_ENABLE_SPU=ON `
     -DPS3RECOMP_DIR="$sdk" `
     -DCMAKE_C_FLAGS="-D_WIN32_WINNT=0x0A00" `
     -DCMAKE_CXX_FLAGS="-D_WIN32_WINNT=0x0A00"

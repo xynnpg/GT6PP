@@ -61,6 +61,11 @@ BOOT_PREPARE_FUNC = "func_00A11F20"
 BOOT_PREPARE_REQUIRED = ("gt6_menu_worker_prepare(ctx);",)
 BOOT_LOAD_FUNC = "func_005FA338"
 BOOT_LOAD_REQUIRED = ("gt6_project_load_probe(ctx);",)
+# docs/analysis/boot-project-handoff-fix.md: the pending request is consumed
+# by the manager's processEventLoop callback 0x568658, pumped from the worker
+# loop (func_00A12170).  Fail the relift if the pump is lost.
+BOOT_PUMP_FUNC = "func_00A12170"
+BOOT_PUMP_REQUIRED = ("gt6_menu_project_tick(ctx, (uint32_t)ctx->gpr[25]);",)
 # Current-build MGOM constructor/vector gate probes.
 BOOT_EXTRA = (
     ("func_006C4EC0", "gt6_mgom_class_probe(ctx);"),
@@ -144,7 +149,8 @@ def main(argv: list[str]) -> int:
     # Boot/presents menu-worker hook (docs/analysis/boot-presents-fix.md).
     for fname, required in ((BOOT_WORKER_FUNC, BOOT_WORKER_REQUIRED),
                             (BOOT_PREPARE_FUNC, BOOT_PREPARE_REQUIRED),
-                            (BOOT_LOAD_FUNC, BOOT_LOAD_REQUIRED)):
+                            (BOOT_LOAD_FUNC, BOOT_LOAD_REQUIRED),
+                            (BOOT_PUMP_FUNC, BOOT_PUMP_REQUIRED)):
         n = 0
         for path in sorted(root.glob("ppu_recomp_*.cpp")):
             body = find_function(path.read_text(encoding="latin-1"), fname)

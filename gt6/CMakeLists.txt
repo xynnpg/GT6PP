@@ -57,12 +57,13 @@ set(PS3RECOMP_PPU_SOURCES
 # workloads themselves all pass one raw 0x2F80-byte job-manager policy module
 # at guest EA 0x013FFE00 (`spu_workloads_pm.c`, image id 5). See
 # docs/analysis/spu-spurs.md.
-option(GT6_ENABLE_SPU "Compile and register the lifted SPU images" OFF)
-set(GT6_SPU_SOURCES
-    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads.c"
-    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_pm.c"
-    "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_jobs.c")
+option(GT6_ENABLE_SPU "Compile and register the lifted SPU images" ON)
+set(GT6_SPU_SOURCES)
 if(GT6_ENABLE_SPU)
+    list(APPEND GT6_SPU_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads.c"
+        "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_pm.c"
+        "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_jobs.c")
     file(GLOB GT6_SPU_LIFTED CONFIGURE_DEPENDS
         "${CMAKE_SOURCE_DIR}/generated/spu_lifted/*/spu_recomp.c")
     file(GLOB GT6_SPU_JOB_LIFTED CONFIGURE_DEPENDS
@@ -75,6 +76,9 @@ if(GT6_ENABLE_SPU)
     # the include to these TUs so the huge PPU chunks keep their cached command.
     set_source_files_properties(${GT6_SPU_SOURCES} PROPERTIES
         INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu")
+else()
+    list(APPEND GT6_SPU_SOURCES
+        "${CMAKE_SOURCE_DIR}/src/gen/spu_workloads_disabled.c")
 endif()
 
 add_executable(gt6
@@ -98,6 +102,7 @@ target_include_directories(gt6 PRIVATE
     ${PS3RECOMP_DIR}/runtime/ppu
     ${PS3RECOMP_DIR}/runtime/memory
     ${PS3RECOMP_DIR}/runtime/syscalls
+    ${PS3RECOMP_DIR}/runtime/spu
 )
 
 target_link_libraries(gt6 PRIVATE ps3recomp_runtime)

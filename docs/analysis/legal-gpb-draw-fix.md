@@ -5,9 +5,12 @@
 `gt6/build/gt6.exe`; D3D12 backend in
 `third_party/ps3recomp/libs/video/rsx_d3d12_backend.c`.
 **Scope:** read-only analysis of the GPB container, `boot.adc`, and the
-current D3D12 backend. No build and no `gt6.exe` run were performed. The
-backend is delivered as `patches/gt6-legal-gpb-draw-fix.patch`; the working
-tree copy of `third_party/ps3recomp` was restored after generating it.
+current D3D12 backend. The generic legacy textured path described here is
+**implemented and applied in the working tree** of
+`third_party/ps3recomp` (uncommitted) and recorded in
+`patches/gt6-legal-gpb-draw-fix.patch`. No build and no `gt6.exe` run were
+performed for this report (READ-ONLY w.r.t. `gt6.exe`); verification is by
+log/gate inspection only.
 
 ## 0. Verdict
 
@@ -15,11 +18,11 @@ tree copy of `third_party/ps3recomp` was restored after generating it.
 |---|---|
 | What is the first real GPB draw? | The `PresentsRoot` page draws its image plates. `PresentsRoot.ad` (embedded in `boot.adc` at `0x1D374`) owns `Plate0`/`Plate1`; `changeImage` sets `/image/boot/<path>.dds` on the front plate and runs the two `ScalarInterpolator`s for a cross-fade. The first sequence is `common/JP/scei` (2 s), `common/notice` (2 s), `scea/JP/epilepsy` (4 s). |
 | What does it supply? | A 2D textured image quad/triangle pair: attr0 position, attr3 colour/alpha, attr8 (or attr2) UVs, texture unit 0, backbuffer target. The texture is the GPB's embedded TXS3: `scei` 864x128 DXT1 (`0xA6`), `notice` 1440x720 DXT1, `epilepsy` 1920x1080 DXT1; the page also carries `pdi` 460x80 A8R8G8B8 (`0xA5`) and `loading_circle` 24x24 DXT1. |
-| VP or no VP? | **Not measured yet.** The native boot path does not reach `PresentsRoot` in the current logs, so the guest state of the first plate draw is unknown. The patch covers the **no-VP** case; a draw with `vp_ucode_bytes >= 16` already uses the VP/FP path and is unchanged. |
-| Why is it currently dropped? | `d3d12_bind_texture` records a generic texture in `cur_texs[0]` but sets `tex_bound` only for B8 (`0x81`). The legacy fallback record writes `textured=0` and no texture fields, and the only legacy textured PSO samples the dbgfont atlas with `uv*10/8+0.59` as coverage. A no-VP GPB image is therefore submitted as an untextured quad (or samples the wrong atlas). |
-| Missing path | **Generic legacy textured PSO + per-draw guest texture upload/SRV for `is_vp == 0` draws.** |
-| Patch | `patches/gt6-legal-gpb-draw-fix.patch` (applies inside `third_party/ps3recomp`). |
-| First draw to test | `PresentsRoot.changeImage("common/JP/scei")`: 864x128 DXT1, then `notice`, then `epilepsy`. The 30 s oracle frame is an exact `epilepsy.dds` match and is the strongest pixel gate. |
+| VP or no VP? | **Not measured yet.** The native boot path does not reach `PresentsRoot` in the current logs, so the guest state of the first plate draw is unknown. The backend now handles **both** branches: `vp_ucode_bytes >= 16` uses the existing VP/FP texture path (`vp_upload_tex_slot` → guest-FP PSO sampling t0); `vp_ucode_bytes < 16` uses the new generic legacy textured PSO added by this patch. |
+| Why is/was it dropped? | Before the patch, `d3d12_bind_texture` recorded a generic texture in `cur_texs[0]` but set `tex_bound` only for B8 (`0x81`), so the legacy fallback wrote `textured=0` and no texture fields; the only legacy textured PSO sampled the dbgfont atlas (`uv*10/8+0.59` coverage) and never a GPB image. A no-VP GPB image was submitted as an untextured quad. |
+| Missing path | **None remaining.** The generic legacy textured PSO + per-draw guest texture upload/SRV for `is_vp == 0` draws is implemented. The VP/FP path already existed. |
+| Patch | `patches/gt6-legal-gpb-draw-fix.patch` (applies inside `third_party/ps3recomp`). Verified: its hunks exactly match the working-tree backend; it reverse-applies cleanly to the tree and reproduces it. Base note: the patch context assumes the immediate-path fields (`is_immediate`, `pipeline_state_immediate`) already exist, i.e. it targets the tree state that also carries the DATA2F/self-test work, not raw `ps3recomp` HEAD `4e8f3ca`. |
+| First draw to test | `PresentsRoot.changeImage("common/JP/scei")`: 864x128 DXT1, then `notice` (1440x720 DXT1), then `epilepsy` (1920x1080 DXT1). The 30 s oracle frame is an exact `epilepsy.dds` match and is the strongest pixel gate. |
 
 ## 1. What the first GPB draw supplies
 
@@ -67,9 +70,10 @@ payload starts at `+0x80`:
 
 `d3d12_bind_texture` masks `LN(0x20)`/`UN(0x40)` with `fmt & 0x9F`, so all
 four image classes are already accepted by
-`vp_upload_tex_slot`/`rsx_texture_layout`. The missing piece is not decode or
-format support; it is that the **legacy/no-VP draw never carries the binding
-into `render_frame` and has no PSO that samples a generic image**.
+`vp_upload_tex_slot`/`rsx_texture_layout`. Decode and format support exist;
+what was missing (now implemented by §3) is that the legacy/no-VP draw never
+carried the binding into `render_frame` and had no PSO that samples a generic
+image.
 
 ### 1.3 State the draw is expected to carry
 
@@ -95,148 +99,137 @@ proven for PresentsRoot because no PresentsRoot RSX stream has been captured.
 The patch is the no-VP fallback for exactly that QUADS/attr0/attr8 shape; it
 does not change the expected VP branch.
 
-## 2. Why the current backend cannot draw it
+## 2. What the backend does with the first GPB draw
 
-Baseline line references are from the unpatched
-`rsx_d3d12_backend.c` at `08f92ec`.
+Two branches now cover the first plate draw; which one fires depends on the
+guest state (`vp_ucode_bytes`) which is not yet measured:
 
-1. **The bind is recorded but not flagged as textured.**
-   `d3d12_bind_texture` (line 8426) populates `cur_texs[unit]` for `0x85`,
-   `0x8B`, `0x86..0x88`, and `0x9A`, but only B8 (`0x81`) sets
-   `s_d3d.tex_bound = 1` (lines 8570-8573). Every generic GPB bind leaves
-   `tex_bound = 0`.
-2. **The legacy fallback throws the binding away.**
-   The non-VP triangle/other fallback in `d3d12_draw_arrays` (line 7846)
-   writes `textured = 0` and never copies `cur_texs[0]` into the draw record
-   (around line 8144). The legacy QUADS fallback copies only
-   `textured = tex_bound`. A GPB image draw therefore reaches
-   `render_frame()` with `t0 = 0`.
-3. **The only legacy textured PSO is the dbgfont atlas.**
-   `pipeline_state_tex` (line 334, created around line 1216) uses:
-   ```hlsl
-   float2 uv2 = float2(i.uv.x*10.0, i.uv.y*8.0 + 0.59);
-   float cov = tex.Sample(smp, uv2).r;
-   return float4(i.col.rgb, i.col.a * cov);
-   ```
-   That is a single-channel coverage atlas with deliberately distorted
-   coordinates. Sampling a GPB image with it is wrong even if the SRV were
-   bound.
-4. **The legacy PSO selector only checks the atlas.**
-   The legacy pass chooses `pipeline_state_tex` only when
-   `dr->textured && tex_ready` (line 5312); there is no branch for a generic
-   guest texture. The VP pass already uploads/samples generic textures through
-   `vp_upload_tex_slot`, but it is gated on `is_vp`.
-5. **The atlas upload is the only legacy upload.**
-   `render_frame()` uploads the B8 atlas into R8 and writes its SRV at heap
-   slot 0. Nothing uploads a generic texture for a no-VP draw, and the SRV
-   heap is only made current when `tex_ready` is set. If a GPB image were the
-   first textured draw, it would not even have a descriptor heap bound.
+### 2.1 VP branch (`vp_ucode_bytes >= 16`, expected)
+`d3d12_draw_arrays` routes `QUADS`/`TRIANGLES`/`TRIANGLE_STRIP` to `upload_*_vp`,
+which fetches all 16 attributes, expands quads to a triangle list, and records
+`is_vp=1` with `fp_addr`, per-unit textures (`cur_texs[0..3]` copied at
+record time), blend key, target, and `cb_slot`. `render_frame()`'s VP pass
+compiles the guest FP via `vp_get_fp_pso()` and uploads the draw's unit-0
+texture through `vp_upload_tex_slot()`, binding the per-draw SRV window at
+`DRAW_SRV_BASE + d*4` as t0. A DXT1 GPB plate therefore samples correctly
+*provided* the guest FP decompiles/compiles. If `fp_addr == 0` on a VP draw,
+the fallback is the atlas/colour PSO pair (P1b territory — not part of this
+patch).
 
-## 3. Patch: smallest generic legacy textured path
+### 2.2 Generic legacy branch (`vp_ucode_bytes < 16`, added by this patch)
+Without guest VP microcode the draw falls to the legacy expansion
+(`upload_quads_from_rsx` / `upload_vertices_from_rsx`), which reads attr0
+position, attr3 colour (constant or array), attr8..15/attr2 UV, and applies
+the RSX viewport transform. The patch makes this path sample a generic guest
+image:
 
-`patches/gt6-legal-gpb-draw-fix.patch` adds only the legacy/no-VP path; the
-VP/FP path is untouched.
+1. **Bind is captured at draw time.** `legacy_record_texture()` is called by
+   both legacy record builders (QUADS fallback and triangle/other fallback).
+   It snapshots unit 0 (`off`, `raw`, `w`, `h`, `fmt`, `ctrl1`, `cube`,
+   `mips`, address/filter/control/border) into `dr->tex[0]` and sets
+   `dr->legacy_tex = 1`, but only when
+   `legacy_generic_tex_bound()` is true: unit 0 set and non-zero, format in
+   `0x85` / `0x86..0x88` (RGBA8 / DXT1-23-45), and the B8 atlas (`0x81`) is
+   not the bound texture (the atlas keeps its own coverage PSO).
+2. **Texture uploaded per draw.** `render_frame()` runs a pre-pass loop that,
+   for each non-VP, non-clear record with `legacy_tex`, calls
+   `vp_upload_tex_slot(dr->tex[0].off, w, h, fmt, 0, mips)` (reusing the
+   existing DXT1 block-copy / RGBA8 decoder — no new decoder) and writes the
+   resulting SRV into the record's own 4-descriptor window at
+   `DRAW_SRV_BASE + d*4` via `srv_write_ex()`. Two legacy image draws cannot
+   alias a descriptor.
+3. **SRV bound as t0 at draw time.** The legacy replay loop binds the SRV heap,
+   binds slot 0 (atlas) as the default t0 table, then rebinds the per-draw
+   window for generic-textured records (`last_srv_slot` dedupes consecutive
+   draws that share a window).
+4. **PSO selection.** `pipeline_state_tex_generic` (created next to the atlas
+   PSO in `init_d3d12`) is selected when
+   `dr->legacy_tex && dr->tex_slot >= 0`. Its PS is
+   `tex.Sample(smp, i.uv) * i.col` — straight RGBA sample modulated by vertex
+   colour/alpha (the plate fade), straight-alpha blending, depth off, no
+   dbgfont `*10`/`*8` UV scaling and no coverage->alpha reinterpretation.
+   The VS is the existing `vs_tex` (MVP `c0..c3` via root constants b0 +
+   position/colour/UV), so positions go through the guest MVP/identity.
+5. **Vertex-position heuristic gated.** `read_rsx_vertex()`'s dbgfont
+   fractional-position fold is skipped when `legacy_generic_tex_bound()`, so a
+   normal 2D plate position reaches the VS unchanged. Caveat: with no guest VP
+   and no ortho `c0..c3`/viewport transform, window-pixel positions clip; the
+   verification gates below require `c0..c3` or `viewport_scale` to be non-zero.
+6. **Lifetime.** `pipeline_state_tex_generic` is released in
+   `rsx_d3d12_backend_shutdown`.
 
-### 3.1 Record the binding
+### 2.3 Before the patch (baseline `08f92ec`)
+For the record, the pre-patch defect was: `d3d12_bind_texture` populated
+`cur_texs[unit]` for `0x85`/`0x8B`/`0x86..0x88`/`0x9A` but set
+`s_d3d.tex_bound = 1` only for B8 (`0x81`), so every generic GPB bind left
+`tex_bound = 0`; the legacy fallback wrote `textured = 0` and no texture
+fields, reaching `render_frame()` with `t0 = 0`; and the only legacy textured
+PSO was the dbgfont atlas (`uv*10/8+0.59` coverage), never a GPB sampler.
 
-- New `D3D12DrawRecord.legacy_tex` flag.
-- `legacy_generic_tex_format()` accepts `0x85` and `0x86..0x88` (RGBA8,
-  DXT1/23/45). B8 (`0x81`) stays on the atlas PSO; G8B8 (`0x8B`) stays
-  untextured because it is LBP's font atlas, not a colour image.
-- `legacy_record_texture()` snapshots unit 0 (`off`, `raw`, `w`, `h`, `fmt`,
-  `ctrl1`, `cube`, `mips`, address/filter/control/border) into `tex[0]` when a
-  generic image is bound.
-- Both legacy record builders call it: the QUADS fallback and the
-  triangle/other fallback.
+## 3. Patch file contents
 
-### 3.2 New PSO
+`patches/gt6-legal-gpb-draw-fix.patch` modifies a single file,
+`libs/video/rsx_d3d12_backend.c` (inside `third_party/ps3recomp`), and adds
+only the legacy/no-VP path; the VP/FP path is untouched. Implementation detail
+is in §2.2; this section lists what the patch touches for review.
 
-`pipeline_state_tex_generic` reuses the existing textured VS (MVP from
-`c0..c3` + UV) and adds a direct colour PS:
+- `D3D12DrawRecord`: new `legacy_tex` flag (no-VP draw samples tex[0] through
+  the generic legacy textured PSO).
+- `D3D12State`: new `pipeline_state_tex_generic` PSO pointer.
+- `init_d3d12()`: compiles `ps_tex_generic` (`tex.Sample(smp, uv) * i.col`,
+  straight-alpha blend, depth off, `vs_tex` MVP VS) and creates
+  `pipeline_state_tex_generic`; renames the atlas PSO comment to "dbgfont
+  atlas PS".
+- New helpers: `legacy_generic_tex_format()` (`0x85` / `0x86..0x88`),
+  `legacy_generic_tex_dxgi()`, `legacy_generic_tex_bound()` (excludes B8
+  atlas and unset unit 0), `legacy_record_texture()` (snapshots unit 0 into
+  `dr->tex[0]`, sets `legacy_tex`).
+- `render_frame()`: legacy per-draw upload pre-pass calling
+  `vp_upload_tex_slot()` and writing each record's SRV window at
+  `DRAW_SRV_BASE + d*4`; SRV heap bound unconditionally; `last_srv_slot`
+  dedup; PSO selection branch
+  `legacy_tex && tex_slot >= 0 -> pipeline_state_tex_generic`.
+- `read_rsx_vertex()`: dbgfont fractional-position fold gated on
+  `!legacy_generic_tex_bound()`.
+- `d3d12_draw_arrays()`: both legacy record builders (QUADS and
+  triangle/other) call `legacy_record_texture(dr)`.
+- `[DRAWDIAG]`: generic-texture/no-VP line now reports whether the legacy
+  generic PSO will be used or the format is not sampleable.
+- `[LEGACYTEX]`: new per-record upload log (`-> generic PSO` or
+  `upload FAILED -> untextured`).
+- `rsx_d3d12_backend_shutdown()`: releases `pipeline_state_tex_generic`.
 
-```hlsl
-Texture2D tex : register(t0);
-SamplerState smp : register(s0);
-float4 main(PSIn i) : SV_TARGET { return tex.Sample(smp, i.uv) * i.col; }
-```
-
-No dbgfont UV scaling, no coverage reinterpretation. The vertex colour
-(including alpha) modulates the sampled RGBA. Blend is straight alpha and
-depth is off, matching a 2D UI overlay. The PSO is created next to the atlas
-PSO and released in `rsx_d3d12_backend_shutdown`.
-
-### 3.3 Upload and bind at draw time
-
-`render_frame()` gets a second pre-pass loop after the VP texture loop:
-
-```c
-if (dr->is_vp || dr->is_clear || !dr->legacy_tex) continue;
-ts = vp_upload_tex_slot(dr->tex[0].off, dr->tex[0].w, dr->tex[0].h,
-                        dr->tex[0].fmt, 0, dr->tex[0].mips);
-srv_write_ex(DRAW_SRV_BASE + d * 4, s_d3d.vp_tex[ts].res, sf,
-             rsx_remap_to_d3d(dr->tex[0].ctrl1, bf), 0);
-```
-
-- It reuses the existing decoder/upload/cache (`vp_upload_tex_slot`), so DXT1
-  block copy, RGBA8 conversion, swizzle and checksum caching are the same code
-  the VP path already uses.
-- Each draw gets its own 4-descriptor window at
-  `DRAW_SRV_BASE + draw_index * 4`, so two legacy image draws cannot share a
-  descriptor. The VP pass uses the same windows by draw index; a record is
-  either VP or legacy, never both.
-- The legacy pass makes the SRV heap current even when the atlas has not been
-  uploaded yet, selects `pipeline_state_tex_generic`, and binds the record's
-  window as t0. Atlas draws still bind slot 0 and use `pipeline_state_tex`.
-
-### 3.4 Diagnostics
-
-- New `[LEGACYTEX] op=<n> t0=0x<off> fmt=0x<fmt> <w>x<h> slot=<n> -> generic PSO`
-  on the first successful uploads, or `upload FAILED -> untextured`.
-- The existing `[DRAWDIAG]` "generic texture bound but no VP" line now says
-  whether the legacy generic PSO will be used or the format is not sampleable.
-- `RSX_CAP` manifests now show the binding because `tex[0].raw`/`off`/`fmt`
-  are populated for legacy records.
-
-### 3.5 Vertex-position caveat
-
-`read_rsx_vertex()` has a dbgfont heuristic: positions outside NDC are folded
-to their fractional part (`frac(x)*2-1`). That is correct for the biased
-dbgfont quads and fatal for a normal 2D image position. The patch skips the
-heuristic when a generic legacy texture is bound, so the guest position reaches
-the PSO's MVP/vertex-constant transform unchanged. If the first GPB draw has
-neither a VP nor an ortho `c0..c3`/viewport transform, its positions will clip;
-the verification steps below require `c0..c3` or `viewport_scale` to be
-non-zero, or a later draw with those set.
+**Review note:** the patch's context assumes the immediate-path fields
+(`is_immediate`, `pipeline_state_immediate`) already exist, so it targets the
+tree state that also carries the DATA2F/self-test work, not raw
+`ps3recomp` HEAD `4e8f3ca`. Verified: the patch's hunks exactly match the
+working tree (reverse-applies cleanly and reproduces it); see
+`docs/analysis/first-draw-audit.md` §8.
 
 ## 4. Verification
 
-### 4.1 Apply and build
+The patch is already applied in the working tree of
+`third_party/ps3recomp`; no source edit is needed. Because `gt6.exe` is
+READ-ONLY (no build, no run), verification is by log/gate inspection against
+a real run that reaches `PresentsRoot` (boot/presents load must land first —
+see `docs/analysis/first-visible-ui-fix.md` §5). The diagnostic DDS overlay
+must stay off; do **not** count an overlay frame as a legal-GPB result.
 
-```powershell
-git -C third_party/ps3recomp apply --check ..\..\patches\gt6-legal-gpb-draw-fix.patch
-git -C third_party/ps3recomp apply ..\..\patches\gt6-legal-gpb-draw-fix.patch
-powershell -ExecutionPolicy Bypass -File scripts\build-gt6.ps1
-```
-
-No build/run was performed for this report.
-
-### 4.2 Run the real frame only
-
-The diagnostic DDS overlay must stay off. Do **not** count an overlay frame.
+### 4.1 Run the real frame with the overlay off
 
 ```powershell
 Remove-Item Env:PS3_HEADLESS -ErrorAction SilentlyContinue
-$env:GT6_BRINGUP_DDS   = "0"          # explicit 0; unset re-enables the overlay
-$env:RSX_CAP           = "1:16:1"     # 1 s windows can be missed by 1:4:60
+$env:GT6_BRINGUP_DDS   = "0"          # explicit 0; overlay is opt-in
+$env:RSX_CAP           = "1:16:1"     # 1 s windows; 1:4:60 can miss the 2 s scei/not notice windows
 $env:RSX_CAP_DIR       = "work/rsxcap_legal_gpb"
 $env:RSX_VTXDBG        = "16"
 $env:GT6_BOOTUI_TRACE  = "1"
 $env:GT6_BOOT_TRACE    = "1"
 $env:PS3_VERBOSE       = "1"
-gt6\build\gt6.exe work\bin\EMAIN.elf 2> work\legal_gpb_run.err
+# gt6\build\gt6.exe work\bin\EMAIN.elf 2> work\legal_gpb_run.err   (READ-ONLY: not executed here)
 ```
 
-### 4.3 Gate 1: `RSX_CAP` manifest has a real t0
+### 4.2 Gate 1: `RSX_CAP` manifest has a real t0
 
 ```powershell
 Select-String work\rsxcap_legal_gpb\frame_00\manifest.txt `
@@ -247,16 +240,16 @@ Required: a `DRAW` op with `t0 != 0` and a `t0 off=... fmt=...` child line.
 The first legal image should be one of:
 
 ```text
-t0 off=0x........ fmt=0x86 (SZ) 864x128
-t0 off=0x........ fmt=0x86 (SZ) 1440x720
-t0 off=0x........ fmt=0x86 (SZ) 1920x1080
-t0 off=0x........ fmt=0x85 (SZ) 460x80
+t0 off=0x........ fmt=0x86 (SZ) 864x128    ; scei
+t0 off=0x........ fmt=0x86 (SZ) 1440x720   ; notice
+t0 off=0x........ fmt=0x86 (SZ) 1920x1080  ; epilepsy
+t0 off=0x........ fmt=0x85 (SZ) 460x80     ; pdi
 ```
 
 `t0=0` on the plate draw means the bind was not captured; check
 `[DRAWDIAG] tex0` and the `SET_TEXTURE_OFFSET`/format pair.
 
-### 4.4 Gate 2: `[DRAWDIAG]` / `[LEGACYVTX]` / `[LEGACYTEX]`
+### 4.3 Gate 2: `[DRAWDIAG]` / `[LEGACYVTX]` / `[LEGACYTEX]`
 
 ```powershell
 Select-String work\legal_gpb_run.err `
@@ -266,38 +259,45 @@ Select-String work\legal_gpb_run.err `
 Required:
 
 - `[LEGACYTEX] op=... t0=0x... fmt=0x86 864x128 slot=... -> generic PSO`
-  (or the notice/epilepsy/pdi size), not `upload FAILED`.
+  (or notice/epilepsy/pdi size), not `upload FAILED`. Absent on a VP-branch
+  draw (use `[VP]` / `[FP]` logs instead).
 - `[DRAWDIAG] prim=... vp_ucode=0 ... target=0x... (display)` for the legacy
-  path; a draw with `vp_ucode>=16` is the VP path and must be judged through
-  its FP logs instead.
+  path; `vp_ucode>=16` means the VP path — judge via `[VP] pipeline ready` /
+  `[FP] guest FP pipeline ready (fp=0x...)` and no `[FP] decompile fail` /
+  `PS compile FAIL` / `PSO FAIL`.
 - `[DRAWDIAG] a3 en=1` with non-black constant/array colour, or
   `[LEGACYVTX] col=(...)` non-zero, and `uv=(...)` non-zero.
 - `tex0=0x... fmt=0x86 ... bound=0 atlas=0` (the generic bind is intentionally
   not the B8 atlas flag).
 
-### 4.5 Gate 3: frame check with the overlay off
+### 4.4 Gate 3: frame check with the overlay off
 
 ```powershell
 python tools\gt6_frame_check.py work\rsxcap_legal_gpb `
   --glob "frame_*/backbuffer.bmp" --min-nonblack 1.0 --min-colors 16
 ```
 
-A PASS is only valid with `GT6_BRINGUP_DDS=0`. The first `scei` plate is
-864x128 centred on a 1280x720 frame, so its screen coverage is only about
+A PASS is only valid with `GT6_BRINGUP_DDS=0` (the overlay is opt-in and
+unset/empty is also off). The first `scei` plate is
+864x128 centred on a 1280x720 frame, so screen coverage is only about
 1.5-3.3 %; `--min-nonblack 1.0 --min-colors 16` is the gate for the first
 legal frame. Reserve `--min-nonblack 5` for the full-screen `epilepsy` frame.
 `first-draw-audit.md` §5.1-5.2 gives the same threshold caveat.
+`[BRINGUP]` must be absent and the manifest texture offset must match the GPB
+bind; `draws=1` plus a non-black BMP is **not** sufficient (the overlay adds
+no draw — see `first-draw-audit.md` §1.3).
 
-### 4.6 Negative controls
+### 4.5 Negative controls
 
 | Observation | Meaning |
 |---|---|
 | `[LEGACYTEX] ... upload FAILED` | Guest offset resolved to 0 or the texture is empty; check `TEXSRC`/`TEX_PROBE`. |
 | `[DRAWDIAG] generic texture bound, no VP: format NOT sampleable...` | Format outside `0x85/0x86..0x88`; GPB expects `0xA6`/`0xA5`. |
 | Manifest `t0=0` | Legacy record did not capture unit 0; check `SET_TEXTURE_OFFSET` ordering before `BEGIN_END`. |
-| `vp_ucode>=16` | Draw took the VP path; this patch is inert for it. |
-| `GT6_BRINGUP_DDS` non-zero | Overlay frame; not a legal-GPB result. |
-| `t0` correct but nothing visible | Check `[LEGACYVTX]` positions/`c0..c3`/`viewport_scale`; the GPB draw may be clipped by the no-VP transform. |
+| `vp_ucode>=16` | Draw took the VP path; this patch is inert for it (judge via guest FP logs). |
+| `GT6_BRINGUP_DDS` set to a DDS path | Overlay frame; not a legal-GPB result. |
+| `t0` correct but nothing visible | Check `[LEGACYVTX]` positions / `c0..c3` / `viewport_scale`; the no-VP GPB draw may be clipped by the missing transform. |
+| Guest FP fallback wrong on a VP draw | `fp_addr != 0` but `[FP]` logs show a compile fail; next step is P1b (generic VP-FP fallback PSO), not another upload change. |
 
 ## 5. Risks and limits
 
