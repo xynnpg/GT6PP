@@ -14,7 +14,7 @@ No emulator. No RPCS3. Just the game as a real x86-64 executable.
 
 > **Goal:** Turn the legendary PS3 racing sim into a true native PC port — higher performance potential, full moddability, and long-term preservation.
 
-![GT6PP bring-up status](docs/progress.png)
+![GT6PP bring-up status](docs/progress.svg)
 
 *Source: `docs/progress.svg`*
 
