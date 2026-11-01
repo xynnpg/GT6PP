@@ -97,7 +97,7 @@ See `ROADMAP.md` for the full plan and `CONTRIBUTORS.md` to join.
 
 ## Progress source of truth
 
-All progress numbers, the version, and the current gate live in [`progress.json`](progress.json). Edit that one file, push, and CI does the rest:
+All progress numbers, the version, and the current gate live in [`progress.json`](progress.json). Raw feed: <https://raw.githubusercontent.com/xynnpg/GT6PP/main/progress.json>. Edit that one file, push, and CI does the rest:
 
 - validates the JSON
 - regenerates `docs/progress.svg` and `docs/progress.png`
