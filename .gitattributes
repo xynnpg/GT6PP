@@ -1,0 +1,4 @@
+# Patch files must keep LF line endings. With core.autocrlf=true on Windows
+# they get checked out as CRLF and `git apply` then fails.
+patches/*.patch -text
+*.patch -text
