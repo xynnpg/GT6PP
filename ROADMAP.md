@@ -36,9 +36,12 @@ a deterministic stop with a named missing syscall/HLE function.
 - [x] Serve `/dev_bdvd/PS3_GAME/USRDIR/GT.VOL` and `PARAM.SFO` through the VFS.
 - [x] Fix the guest main stack / argv / TOC / TLS setup (`ppu_run` handles it).
 - [x] Implement `cellGcmInit`, display buffers, `cellSpurs` init/workloads.
-- [ ] Make the init flag at `0xA13644` true (current stop).
+- [x] Make the init flag at `0xA13644` true (current stop). Boot now runs past it on the EU disc (BCES01893).
 - [ ] Resolve `0x2DDBCC0A`, `0xFAA275A4`, `0x5C832BD7`.
-- [ ] Load the first `GT.VOL` assets (menus, fonts, scripts).
+- [x] *(2026-11-21)* Boot-2 validator passes on the EU disc: root cause was an empty file cache (`B5B260`), fixed via cache-fill workaround (see `docs/analysis/eu-boot-status.md`).
+- [x] *(2026-11-21)* Stub `cellMusicInitialize2` (NID `0xBE50B11E`); game now reaches the language-select dialog at ~36 FPS.
+- [ ] cellMusic callback and syscall 327 are still stubbed (2x).
+- [x] Load the first `GT.VOL` assets (menus, fonts, scripts). `boot.adc`, `BootProject.gpb` and `PresentsRootSCEE.gpb` load on the EU disc.
 - [ ] Add `longjmp`/`setjmp` support if the LZ decoder stalls (GT5P required
       this).
 
@@ -49,9 +52,14 @@ set of assets.
 
 - [ ] Bring up the D3D12 backend, RSX local memory, tiles, Zcull, display
       buffers.
-- [ ] Drain the GCM FIFO and parse the first command buffer.
+- [x] Drain the GCM FIFO and parse the first command buffer. Clears, immediate draws and flips run; with `FP_FORCE=1` the backbuffer fills with geometry. Real frames are still black.
 - [ ] Translate the first RSX vertex/fragment shaders.
-- [ ] Present one frame from the game's own command stream.
+- [x] Present one frame from the game's own command stream. *(EU disc: the "Sony Computer Entertainment presents" legal screen renders, see `docs/analysis/first-frame-sce.png`.)*
+- [x] *(2026-11-21)* Display-offset textures get a screen copy; unwritten zeta textures are filled (`patches/ps3recomp-v0.19.0-gt6-eu-all.patch`).
+- [x] *(2026-11-21)* Language-select dialog renders: panel, title, 4 menu rows. Text is readable via stencil glyphs plus zeta-as-texture (`patches/ps3recomp-v0.19.0-gt6-eu-all.patch`).
+- [x] *(2026-11-21)* Debug tooling: `scripts/cap-gt6.ps1` (one-call render experiments), `TEXDUMP`, zeta fields in the capture manifest.
+- [x] *(2026-11-21)* Dialog background fixed: stale attribute-3 (col0) array ignored, matches the RPCS3 reference (dark uniform background, translucent panel) (`patches/ps3recomp-v0.19.0-gt6-eu-all.patch`, `docs/analysis/eu-language-select-bg.png`).
+- [x] Title colour (blue) and cursor: a3 is only trusted for the text-quad VS (fp 0x4E739C1, a3.x = palette index); all other draws take col0 from VERTEX_DATA4F. Rule applied at BEGIN_END (before layout build), `patches/ps3recomp-v0.19.0-gt6-eu-all.patch`. Row-1 hover highlight vs RPCS3 not verified.
 - [ ] Fix color-buffer / render-target issues as they appear.
 
 **Exit criteria:** a stable menu or attract-mode frame from the game's own

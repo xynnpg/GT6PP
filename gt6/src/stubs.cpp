@@ -36,6 +36,8 @@
  */
 #include "ppu_context.h"
 #include <stdio.h>
+#include <chrono>
+#include <thread>
 #include <stdlib.h>
 #include <string.h>
 
@@ -839,8 +841,13 @@ extern "C" int gt6_guest_file_vtable_valid(uint32_t object_ea)
     if (vtable < 0x01000000u || vtable >= 0x02000000u) return 0;
     const uint32_t open_opd = vm_read32((uint64_t)vtable + 0x20u);
     const uint32_t close_opd = vm_read32((uint64_t)vtable + 0x24u);
-    return (open_opd >= 0x01000000u && open_opd < 0x02000000u) &&
-           (close_opd >= 0x01000000u && close_opd < 0x02000000u);
+    if ((open_opd >= 0x01000000u && open_opd < 0x02000000u) &&
+        (close_opd >= 0x01000000u && close_opd < 0x02000000u))
+        return 1;
+    // Device objects (e.g. the /APP_DATA mount) keep their open method at
+    // slot +0x88 and leave +0x20 empty; they are valid too.
+    const uint32_t dev_open_opd = vm_read32((uint64_t)vtable + 0x88u);
+    return dev_open_opd >= 0x01000000u && dev_open_opd < 0x02000000u;
 }
 
 extern "C" void gt6_script_path_hint(uint32_t reader_ea, uint32_t str_ea)
@@ -1156,6 +1163,186 @@ static void gt6_cellUsbdSetThreadPriority2(ppu_context* ctx)
         }
     }
 
+    ctx->gpr[3] = 0;   /* CELL_OK */
+}
+
+/*
+ * Harmless firmware-import stubs (found as "unresolved NID" at boot; names
+ * recovered by hashing candidates with the PS3 NID suffix). None of them has
+ * a port-side backend, so each reports "nothing available".
+ *   0x7FE92C54 cellUsbdRegisterExtraLdd, 0xBD554BCB cellUsbdRegisterExtraLdd2
+ *   0x1F71ECBE cellKbGetConfiguration (out: arrange/read_mode/code_type)
+ *   0xA5D06BF0 sys_prx_get_module_list, 0xCA9A60BF sys_mempool_create
+ *   0x13EFE7F5 getsockname, 0x8AF3825E inet_pton
+ */
+static void gt6_stub_log_once(const char* name, int* flag, long rc)
+{
+    if (!*flag) {
+        fprintf(stderr, "[GT6] %s -> %ld (stub)\n", name, rc);
+        *flag = 1;
+    }
+}
+
+static void gt6_cellUsbdRegisterExtraLdd(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("cellUsbdRegisterExtraLdd", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+static void gt6_cellUsbdRegisterExtraLdd2(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("cellUsbdRegisterExtraLdd2", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+static void gt6_cellKbGetConfiguration(ppu_context* ctx)
+{
+    static int l = 0;
+    const uint64_t cfg = (uint64_t)(uint32_t)ctx->gpr[4];
+    if (cfg) {
+        vm_write32(cfg + 0, 0);
+        vm_write32(cfg + 4, 0);
+        vm_write32(cfg + 8, 0);
+    }
+    gt6_stub_log_once("cellKbGetConfiguration", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+static void gt6_sys_prx_get_module_list(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("sys_prx_get_module_list", &l, 0x80010003L);
+    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010003; /* ENOSYS */
+}
+
+static void gt6_sys_mempool_create(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("sys_mempool_create", &l, 0x80010004L);
+    ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010004; /* ENOMEM */
+}
+
+static void gt6_net_getsockname(ppu_context* ctx)
+{
+    static int l = 0;
+    /* RPCS3: bind(0.0.0.0:0)+getsockname succeed, then the game creates its net
+     * worker threads. Report an unbound IPv4 sockaddr (len 16, AF_INET). */
+    const uint32_t addr = (uint32_t)ctx->gpr[4], plen = (uint32_t)ctx->gpr[5];
+    if (addr && vm_base) { memset(vm_base + addr, 0, 16); vm_base[addr] = 16; vm_base[addr + 1] = 2; }
+    if (plen && vm_base) { vm_write32(plen, 16); }
+    gt6_stub_log_once("getsockname", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+static void gt6_unknown_27DEDA93(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("unknown_0x27DEDA93 (net-area import, name unknown)", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+extern uint32_t g_sys_mem_bump_ptr;
+extern "C" int32_t cellSysutilQueueGuestCallbackArgs(uint32_t opd, const uint64_t args[8]);
+// cellMusicInitialize2 (NID 0xBE50B11E): no music backend. CELL_OK + INITIALIZE_RESULT callback.
+static void gt6_cellMusicInitialize2(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("cellMusicInitialize2 -> CELL_OK", &l, 0);
+    uint32_t func = (uint32_t)ctx->gpr[5], user = (uint32_t)ctx->gpr[6];
+    printf("[GT6] cellMusicInitialize2 func=0x%08X user=0x%08X\n", func, user);
+    /* RPCS3 reports INITIALIZE_RESULT(1, &CELL_OK, user) via the sysutil
+     * callback queue. */
+    if (func) {
+        /* arg2 is a pointer to the result s32 (CELL_OK); the guest waits on it. */
+        static uint32_t res_addr = 0;
+        if (!res_addr && vm_base) { res_addr = g_sys_mem_bump_ptr; g_sys_mem_bump_ptr += 0x10000; memset(vm_base + res_addr, 0, 16); }
+        const uint64_t a[8] = {1, (uint64_t)res_addr, (uint64_t)user, 0, 0, 0, 0, 0};
+        cellSysutilQueueGuestCallbackArgs(func, a);
+    }
+    ctx->gpr[3] = 0;
+}
+
+// cellMusic*2 utility calls (RPCS3: CELL_OK; GetPlaybackStatus2 writes STOP=0).
+// The game polls GetPlaybackStatus2 from its own worker thread; unresolved
+// imports left r3 undefined and thread creation stopped early.
+static void gt6_cellMusicGetPlaybackStatus2(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("cellMusicGetPlaybackStatus2 -> STOP", &l, 0);
+    uint32_t st = (uint32_t)ctx->gpr[3];
+    if (st) { if (vm_base) memset(vm_base + st, 0, 4); }
+    ctx->gpr[3] = 0;
+}
+static void gt6_cellMusicOk(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("cellMusic*2 -> CELL_OK", &l, 0);
+    ctx->gpr[3] = 0;
+}
+
+static void gt6_net_inet_pton(ppu_context* ctx)
+{
+    static int l = 0;
+    gt6_stub_log_once("inet_pton", &l, 0);
+    ctx->gpr[3] = 0;   /* 0 = invalid address string */
+}
+
+/*
+ * cellFiberPpuWaitFlag (0xA4599CF3) / cellFiberPpuCheckFlags (0xF6C6900C).
+ *
+ * Neither NID is named in the import table; the names were found by hashing
+ * the cellFiber export list. The GT6 call sites (0xA2F448, 0xA2F8E8) are a
+ * fiber-side event: the waiter stores 1 into a word, calls
+ * WaitFlag(&word, 0), and the other side clears the word and calls
+ * CheckFlags(scheduler). Semantics used here: WaitFlag yields the current
+ * fiber until *flag == value; CheckFlags has nothing to do because the
+ * waiter polls on every pass of the scheduler. Outside a fiber, Yield returns
+ * an error and WaitFlag gives up instead of spinning.
+ */
+extern "C" int32_t cellFiberPpuYield(void);
+
+static void gt6_cellFiberPpuWaitFlag(ppu_context* ctx)
+{
+    const uint32_t flag  = (uint32_t)ctx->gpr[3];
+    const uint32_t value = (uint32_t)ctx->gpr[4];
+
+    if (flag) {
+        /* Inside a fiber: yield to the scheduler. On a plain thread Yield
+         * fails; the guest then loops on its own flag word, so block here
+         * (host sleep) until another thread clears it, bounded so a lost
+         * wake-up cannot hang the thread forever. */
+        int waited_ms = 0;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (vm_read32((uint64_t)flag) != value) {
+            if (cellFiberPpuYield() == 0) {
+                /* Yielding fiber: the guest's timed-sleep loops (0x7DBF48)
+                 * park here and expect the wake-up to come from a timer
+                 * thread that does not exist in this port. Give up after a
+                 * short while; every caller re-checks its own condition. */
+                if (std::chrono::steady_clock::now() - t0 > std::chrono::milliseconds(2))
+                    break;
+                continue;
+            }
+            if (waited_ms >= 5000) {
+                static int logged = 0;
+                if (!logged) {
+                    fprintf(stderr, "[GT6] cellFiberPpuWaitFlag(0x%08X, %u) timed out\n",
+                            flag, value);
+                    logged = 1;
+                }
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            ++waited_ms;
+        }
+    }
+    ctx->gpr[3] = 0;   /* CELL_OK */
+}
+
+static void gt6_cellFiberPpuCheckFlags(ppu_context* ctx)
+{
     ctx->gpr[3] = 0;   /* CELL_OK */
 }
 
@@ -1495,5 +1682,25 @@ extern "C" void gt6_hle_overrides(void)
                          gt6_cellVideoOutGetScreenSize);
     ps3_hle_register_ctx(0x5C832BD7u, "cellUsbdSetThreadPriority2",
                          gt6_cellUsbdSetThreadPriority2);
+    ps3_hle_register_ctx(0x7FE92C54u, "cellUsbdRegisterExtraLdd", gt6_cellUsbdRegisterExtraLdd);
+    ps3_hle_register_ctx(0xBD554BCBu, "cellUsbdRegisterExtraLdd2", gt6_cellUsbdRegisterExtraLdd2);
+    ps3_hle_register_ctx(0x1F71ECBEu, "cellKbGetConfiguration", gt6_cellKbGetConfiguration);
+    ps3_hle_register_ctx(0xA5D06BF0u, "sys_prx_get_module_list", gt6_sys_prx_get_module_list);
+    ps3_hle_register_ctx(0xCA9A60BFu, "sys_mempool_create", gt6_sys_mempool_create);
+    ps3_hle_register_ctx(0x13EFE7F5u, "getsockname", gt6_net_getsockname);
+    ps3_hle_register_ctx(0x8AF3825Eu, "inet_pton", gt6_net_inet_pton);
+    ps3_hle_register_ctx(0x27DEDA93u, "unknown_0x27DEDA93", gt6_unknown_27DEDA93);
+    ps3_hle_register_ctx(0xBE50B11Eu, "cellMusicInitialize2", gt6_cellMusicInitialize2);
+    ps3_hle_register_ctx(0x648B7611u, "cellMusicGetPlaybackStatus2", gt6_cellMusicGetPlaybackStatus2);
+    ps3_hle_register_ctx(0x4014C246u, "cellMusicSetVolume2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0x7BE4DC31u, "cellMusicFinalize2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0x2BDC5D6Bu, "cellMusicSetSelectionContext2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0x8793EF97u, "cellMusicGetSelectionContext2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0x98947A6Eu, "cellMusicSetPlaybackCommand2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0xAD04CDDDu, "cellMusicSelectContents2", gt6_cellMusicOk);
+    ps3_hle_register_ctx(0xA4599CF3u, "cellFiberPpuWaitFlag",
+                         gt6_cellFiberPpuWaitFlag);
+    ps3_hle_register_ctx(0xF6C6900Cu, "cellFiberPpuCheckFlags",
+                         gt6_cellFiberPpuCheckFlags);
 }
 

@@ -1,5 +1,7 @@
 # CONTINUE HERE — GT6 native port
 
+> **Update 2026-11-21:** this file describes the US-disc state of 2026-10-31. Current EU-disc state, reproduction and open items: [eu-boot-status.md](eu-boot-status.md).
+
 **Date:** 2026-10-31. **Target:** GT6 US disc `BCUS98296` v1.00, `work/bin/EMAIN.elf`.
 **Executable:** `gt6/build/gt6.exe` (static MinGW runtime; double-click safe).
 **Current visible state:** a black 1280x720 window titled

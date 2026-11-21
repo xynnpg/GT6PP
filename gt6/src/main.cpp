@@ -62,6 +62,13 @@ void ppu_sysprx_register(void);
 void ppu_fs_register(void);
 uint32_t ppu_load_elf(const char* path);   /* ELF -> guest RAM, returns entry OPD */
 int  ppu_run(uint32_t entry_opd, uint32_t stack_top);
+uint64_t ppu_guest_call(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                        uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7);
+extern void (*g_ps3_guest_caller)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t,
+                                  uint64_t, uint64_t, uint64_t, uint64_t);
+static void gt6_guest_caller(uint32_t opd, uint64_t a0, uint64_t a1, uint64_t a2, uint64_t a3,
+                             uint64_t a4, uint64_t a5, uint64_t a6, uint64_t a7)
+{ ppu_guest_call(opd, a0, a1, a2, a3, a4, a5, a6, a7); }
 extern uint32_t g_ppu_main_stack_addr;
 extern uint32_t g_ppu_main_stack_size;
 extern int g_sys_process_exit_called;
@@ -760,6 +767,11 @@ int main(int argc, char* argv[])
     if (char* g = getenv("GT6_GUARD"))
         CreateThread(nullptr, 0, guard_arm, g, 0, nullptr);
 #endif
+
+    /* HLE -> guest callbacks (cellSaveData funcStat/funcFile, sysutil, trophy) all go
+     * through g_ps3_guest_caller. Without it every such call fails with
+     * ERR_FAILURE before the game's callback is even entered. */
+    g_ps3_guest_caller = gt6_guest_caller;
 
     gt6_start_present_thread();
 

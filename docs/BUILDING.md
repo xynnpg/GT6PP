@@ -13,7 +13,7 @@ downloads or distributes game data.
 | CMake | 3.20+ | `python -m cmake` works |
 | Ninja | 1.10+ | `python -m ninja` works |
 | LLVM-MinGW | 20261020 (Clang 23.1.4, UCRT) | portable; extract to `tools/llvm-mingw/` |
-| ps3recomp | `master` | clone to `third_party/ps3recomp` |
+| ps3recomp | `v0.19.0` (`ae92407`) | `scripts/setup-third-party.ps1` |
 | GT5P | `master` | reference sibling port; clone to `third_party/GT5P` |
 | GTToolsSharp | 5.3.5 | volume extractor |
 | RPCS3 | 0.0.43+ | only for offline SELF decryption here |
@@ -23,15 +23,23 @@ upstream GT5P uses. The instructions below use the portable LLVM-MinGW
 toolchain because it needs no Visual Studio install.
 
 ```powershell
-git clone --depth 1 https://github.com/sp00nznet/ps3recomp.git third_party/ps3recomp
-git clone --depth 1 https://github.com/sp00nznet/GT5P.git third_party/GT5P
+# ps3recomp: pinned commit + one patch (see third_party.lock). Idempotent;
+# clones to a temp dir and renames only when the pin is reached.
+powershell -ExecutionPolicy Bypass -File scripts/setup-third-party.ps1
+# Verify later without changing anything (exit 1 if the tree drifted):
+powershell -ExecutionPolicy Bypass -File scripts/setup-third-party.ps1 -Check
 
-# Required on Windows/MinGW: two MSVC-isms in ppu_loader.cpp.
-git -C third_party/ps3recomp apply ..\patches\ps3recomp-mingw-seh.patch
+git clone --depth 1 https://github.com/sp00nznet/GT5P.git third_party/GT5P
 ```
 
-If you use Visual Studio + clang-cl instead of LLVM-MinGW, the patch is not
-needed (MSVC supports `__try`/`__except`), but applying it is harmless.
+`patches/ps3recomp-v0.19.0-gt6-eu-all.patch` is the single canonical patch on
+top of ps3recomp `v0.19.0` (`ae92407`). It contains the MinGW/Clang fixes
+(`ppu_resv_break` linkage, 64-bit `fseek`, exec-range for the exit-chain scan) and the
+GT6 runtime fixes. On v0.19.0 with LLVM-MinGW 23 the `__try`/`__except` code
+builds unpatched. The older `ps3recomp-*.patch` files in `patches/` are the
+history it was consolidated from; do not apply them on top of it.
+
+With Visual Studio + clang-cl the MinGW fixes are unnecessary but harmless.
 
 ## 2. Decrypt the executables
 
@@ -201,10 +209,10 @@ Useful environment variables:
 runtime and the port (the provided CMake does this; the manual command above
 also passes it).
 
-**`__try` / `__except` undeclared, or `ppu_resv_break` linkage error.** Apply
-`patches/ps3recomp-mingw-seh.patch` to `third_party/ps3recomp` (see
-[docs/PATCHES.md](PATCHES.md)). These are MSVC-only constructs that MinGW/Clang
-does not parse.
+**`ppu_resv_break` linkage error.** Run `scripts/setup-third-party.ps1`; the
+canonical patch fixes it (see [docs/PATCHES.md](PATCHES.md)). If `__try` /
+`__except` is undeclared on an older Clang, apply
+`patches/ps3recomp-mingw-seh.patch` as well.
 
 **D3D12 link errors.** MinGW ignores `#pragma comment(lib, ...)`. The port's
 CMake links `d3d12 dxgi dxguid d3dcompiler ws2_32 xinput ole32 bcrypt`

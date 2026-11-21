@@ -1,0 +1,11 @@
+# GT6 EU: file-cache fill after A26510 in func_00B5B260 (generated ppu_recomp_026.cpp, gitignored -> re-apply after relift)
+# Problem: B5B260 allocs cache (size=(filesz+0xFFFF)&~0xFFFF) but nothing fills it; B5B028 reads from zero buffer -> SQLITE_NOTADB on existing 8MB userdb0101.dat -> "Nicht genuegend Speicherplatz" dialog.
+# Fix: in B5B260 success path (after `if(!eq) goto loc_00B5B838` following A26510), jump to this block instead:
+loc_FILL_B5B838:
+        { uint32_t _o=(uint32_t)ctx->gpr[30]; uint32_t _b=vm_read32(_o+0x28); uint32_t _s=vm_read32(_o+0x30);
+          if(_b && _s){
+            ctx->gpr[3]=_o; ctx->gpr[4]=0; ctx->lr=0x00B5B740; func_00B5A944(ctx); DRAIN_TRAMPOLINE(ctx);
+            ctx->gpr[3]=_o; ctx->gpr[4]=_b; ctx->gpr[5]=_s; ctx->lr=0x00B5B740; func_00F7666C(ctx); DRAIN_TRAMPOLINE(ctx);
+          } }
+        goto loc_00B5B838;
+# Verified 2026-11-21: boot 2 with existing 8MB db, no dialog, next gap NID 0xBE50B11E (cellMusicInitialize2).

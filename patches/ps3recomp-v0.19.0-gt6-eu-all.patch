@@ -1,0 +1,2195 @@
+diff --git a/libs/filesystem/cellFs.c b/libs/filesystem/cellFs.c
+index 4d916ac7..b0efad70 100644
+--- a/libs/filesystem/cellFs.c
++++ b/libs/filesystem/cellFs.c
+@@ -585,7 +585,7 @@ s32 cellFsLseek(CellFsFd fd, s64 offset, s32 whence, u64* pos)
+         if (whence == CELL_FS_SEEK_CUR) host_whence = SEEK_CUR;
+         if (whence == CELL_FS_SEEK_END) host_whence = SEEK_END;
+ 
+-#ifdef _MSC_VER
++#if defined(_MSC_VER) || defined(_WIN32)
+         _fseeki64(s_files[fd].host_fp, offset, host_whence);
+         s64 cur = _ftelli64(s_files[fd].host_fp);
+ #else
+diff --git a/libs/input/cellKb.c b/libs/input/cellKb.c
+index 6b4cdbc7..cf40d1b1 100644
+--- a/libs/input/cellKb.c
++++ b/libs/input/cellKb.c
+@@ -206,6 +206,14 @@ s32 cellKbGetData(u32 port_no, CellKbData* data)
+     return CELL_OK;
+ }
+ 
++/* Legacy SDK entry point. GT6 imports NID 0xFF0A21B7 and calls it during the
++ * boot/UI poll; the semantics are the same as cellKbGetData (read current
++ * keyboard state into a CellKbData). */
++s32 cellKbRead(u32 port_no, CellKbData* data)
++{
++    return cellKbGetData(port_no, data);
++}
++
+ /* Guest CellKbInfo layout (big-endian): +0x00 max_connect u32, +0x04
+  * now_connect u32, +0x08 info u32, +0x0C status[] u8 PER KEYBOARD (bytes,
+  * not u32s -- SDK/RPCS3 layout). */
+diff --git a/libs/input/cellKb.h b/libs/input/cellKb.h
+index 49e13905..a1510ede 100644
+--- a/libs/input/cellKb.h
++++ b/libs/input/cellKb.h
+@@ -148,6 +148,7 @@ typedef struct CellKbInfo {
+ s32 cellKbInit(u32 max_connect);
+ s32 cellKbEnd(void);
+ s32 cellKbGetData(u32 port_no, CellKbData* data);
++s32 cellKbRead(u32 port_no, CellKbData* data);   /* legacy alias used by GT6 */
+ s32 cellKbGetInfo(CellKbInfo* info);
+ s32 cellKbSetReadMode(u32 port_no, u32 rmode);
+ s32 cellKbSetCodeType(u32 port_no, u32 codetype);
+diff --git a/libs/input/cellMouse.c b/libs/input/cellMouse.c
+index 1dc2f955..75b98f30 100644
+--- a/libs/input/cellMouse.c
++++ b/libs/input/cellMouse.c
+@@ -11,6 +11,7 @@
+ #include "cellMouse.h"
+ #include <stdio.h>
+ #include <string.h>
++#include <stdlib.h>
+ #include <stdint.h>
+ 
+ /* HLE struct args are GUEST EAs -- write through the vm accessors (also
+@@ -130,6 +131,10 @@ s32 cellMouseInit(u32 max_connect)
+     s_mouse_initialized = 1;
+     s_mouse_max_connect = max_connect;
+     memset(s_mouse_ports, 0, sizeof(s_mouse_ports));
++    /* MOUSE_FAKE=<poll>: diagnostic. Port 0 reports a connected mouse; after
++     * <poll> GetData calls it presses button 1 for 5 polls. MOUSE_TRACE=1 logs
++     * GetInfo/GetData traffic. Off unless set. */
++    if (getenv("MOUSE_FAKE")) s_mouse_ports[0].connected = 1;
+ 
+     /* No mouse is connected until the host says one is (cellMouse_moveEvent
+      * and friends set ports[n].connected). This used to assert port 0 was
+@@ -179,6 +184,13 @@ s32 cellMouseGetData(u32 port_no, CellMouseData* data)
+     if (port_no >= s_mouse_max_connect || !data)
+         return CELL_MOUSE_ERROR_INVALID_PARAMETER;
+ 
++    { static int tr = -1, fk = -2; static long n = 0;
++      if (tr < 0) tr = getenv("MOUSE_TRACE") ? 1 : 0;
++      if (fk == -2) { const char* e = getenv("MOUSE_FAKE"); fk = e ? atoi(e) : -1; }
++      if (tr && (n % 600) == 0) printf("[mouse] GetData port=%u n=%ld conn=%d\n", port_no, n, s_mouse_ports[port_no < CELL_MOUSE_MAX_MICE ? port_no : 0].connected);
++      n++;
++      if (fk >= 0 && port_no == 0 && n > fk && n <= fk + 5) { s_mouse_ports[0].buttons = 1; s_mouse_ports[0].updated = 1; }
++      else if (fk >= 0 && port_no == 0 && n > fk + 5) { s_mouse_ports[0].buttons = 0; } }
+     MousePortState* ms = &s_mouse_ports[port_no];
+ 
+     if (!ms->connected) {
+diff --git a/libs/input/cellPad.c b/libs/input/cellPad.c
+index 5f8a2fa2..5e074615 100644
+--- a/libs/input/cellPad.c
++++ b/libs/input/cellPad.c
+@@ -1201,6 +1201,36 @@ emit:
+      * attack firing once.
+      *
+      * PAD_ALWAYS_CHANGE=1 restores the old always-a-packet behaviour. */
++    { static int _tr = -1; static long _n = 0;
++      if (_tr < 0) _tr = getenv("PAD_TRACE") ? 1 : 0;
++      if (_tr && port_no == 0) { _n++;
++        if ((data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] | data->button[CELL_PAD_BTN_OFFSET_DIGITAL2]) || (_n % 500) == 1)
++            printf("[padtrace] n=%ld len=%d d1=%04X d2=%04X\n", _n, (int)data->len, data->button[CELL_PAD_BTN_OFFSET_DIGITAL1], data->button[CELL_PAD_BTN_OFFSET_DIGITAL2]); } }
++    { static int _tr2 = -1, _d = 0;
++      if (_tr2 < 0) _tr2 = getenv("PAD_TRACE") ? 1 : 0;
++      if (_tr2 && !_d && (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] | data->button[CELL_PAD_BTN_OFFSET_DIGITAL2])) {
++          extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
++          extern void ppu_dump_guest_stack(ppu_context*, const char*);
++          if (g_active_ctx) { _d = 1; printf("[padtrace] buf EA=0x%08X\n", (unsigned)(uintptr_t)data_guest);
++                              ppu_dump_guest_stack(g_active_ctx, "pad"); } } }
++    { /* PAD_STRUCT=<hexbase>: diff 0x400 guest bytes at each poll once a button is held */
++      static int _ps = -1; static unsigned _base = 0; static unsigned _prev[256]; static int _have = 0, _armed = 0, _lines = 0;
++      if (_ps < 0) { const char* e = getenv("PAD_STRUCT"); _ps = (e && *e) ? 1 : 0; if (_ps) _base = (unsigned)strtoul(e, 0, 16); }
++      if (_ps && port_no == 0) {
++          if (data->button[CELL_PAD_BTN_OFFSET_DIGITAL1] | data->button[CELL_PAD_BTN_OFFSET_DIGITAL2]) _armed = 1;
++          unsigned cur[256];
++          for (int i = 0; i < 256; i++) cur[i] = vm_read32(_base + (unsigned)i * 4);
++          if (_have && _armed && _lines < 400)
++              for (int i = 0; i < 256; i++) if (cur[i] != _prev[i] && _lines < 400 && !(i*4>=0xC4 && i*4<=0x128 && (i*4==0xC4||i*4==0xC8||i*4==0x124||i*4==0x128))) { _lines++;
++                  printf("[padstruct] +%03X %08X -> %08X\n", i * 4, _prev[i], cur[i]); }
++          { static int _ch = 0; if (getenv("PAD_LISTENERS") && (_ch++ % 600) == 0) { /* listener list at mgr+0x43C -> +4 chain, next at +8 */
++              unsigned p = vm_read32(0x0165AD40u + 0x43C); unsigned n = p ? vm_read32(p + 4) : 0; int k = 0;
++              printf("[padlisten] hdr=%08X first=%08X\n", p, n);
++              for (unsigned o = 0; o < 0xA0; o += 16) printf("[padlisten] mgr+%03X: %08X %08X %08X %08X\n", o, vm_read32(0x0165AD40u+o), vm_read32(0x0165AD40u+o+4), vm_read32(0x0165AD40u+o+8), vm_read32(0x0165AD40u+o+12));
++              for (unsigned o = 0; o < 0xE0; o += 16) printf("[padlisten] L0+%03X: %08X %08X %08X %08X\n", o, vm_read32(0x0165B1A8u+o), vm_read32(0x0165B1A8u+o+4), vm_read32(0x0165B1A8u+o+8), vm_read32(0x0165B1A8u+o+12));
++              while (n && k++ < 16) { printf("[padlisten]   node=%08X +0=%08X +4=%08X +8=%08X +C=%08X\n", n, vm_read32(n), vm_read32(n+4), vm_read32(n+8), vm_read32(n+12)); n = vm_read32(n + 8); } } }
++          memcpy(_prev, cur, sizeof cur); _have = 1;
++      } }
+     {
+         unsigned int ea = (unsigned int)(uintptr_t)data_guest;
+         vm_write32((unsigned long long)ea + 0, (unsigned int)data->len);   /* len (s32) */
+diff --git a/libs/network/cellNetCtl.c b/libs/network/cellNetCtl.c
+index 8b002ffe..598f33a2 100644
+--- a/libs/network/cellNetCtl.c
++++ b/libs/network/cellNetCtl.c
+@@ -251,6 +251,12 @@ s32 cellNetCtlGetInfo(s32 code, CellNetCtlInfo* info)
+         break;
+ 
+     case CELL_NET_CTL_INFO_HTTP_PROXY_CONFIG:
++        /* RPCS3 offline: GetInfo(0x15) fails with NOT_CONNECTED; GT6 only
++         * continues into its net worker threads after that. */
++        if (!netctl_online() && !getenv("NETCTL_PROXY_OK")) {
++            printf("[cellNetCtl] GetInfo(HTTP_PROXY_CONFIG) -> NOT_CONNECTED (offline)\n");
++            return CELL_NET_CTL_ERROR_NOT_CONNECTED;
++        }
+         info->http_proxy_config = 0; /* disabled */
+         break;
+ 
+diff --git a/libs/spurs/cellFiber.c b/libs/spurs/cellFiber.c
+index 3673985c..1929cb9d 100644
+--- a/libs/spurs/cellFiber.c
++++ b/libs/spurs/cellFiber.c
+@@ -65,7 +65,7 @@ extern PPU_THREAD_LOCAL ppu_context* g_active_ctx;
+  * object gone instead of freed memory.
+  * -----------------------------------------------------------------------*/
+ 
+-enum { F_READY, F_RUNNING, F_WAIT_SIGNAL, F_WAIT_JOIN, F_DONE };
++enum { F_READY, F_RUNNING, F_WAIT_SIGNAL, F_WAIT_JOIN, F_DONE, F_WAIT_FLAG };
+ 
+ typedef struct Sched Sched;
+ typedef struct Fiber Fiber;
+@@ -83,6 +83,8 @@ struct Fiber {
+     int     state;
+     int     signal_pending;      /* a SendSignal arrived before the WaitSignal */
+     u32     join_ea;             /* F_WAIT_JOIN: the fiber waited for */
++    u32     flag_ea;             /* F_WAIT_FLAG: guest word polled */
++    u32     flag_val;            /* F_WAIT_FLAG: value that releases the fiber */
+     s32     status;
+ #ifdef _WIN32
+     void*   host_fiber;
+@@ -147,6 +149,8 @@ static Fiber* pick_runnable(const Sched* s)
+ {
+     Fiber* best = NULL;
+     for (Fiber* f = s_fibers; f; f = f->next) {
++        if (f->sched == s && f->state == F_WAIT_FLAG && vm_read32(f->flag_ea) == f->flag_val)
++            f->state = F_READY;
+         if (f->sched != s || f->state != F_READY) continue;
+         if (!best || f->priority < best->priority ||
+             (f->priority == best->priority && f->seq < best->seq))
+@@ -429,10 +433,22 @@ s32 cellFiberPpuRunFibers(CellFiberPpuScheduler* scheduler)
+     s->running = 1;
+ 
+     for (;;) {
++#ifdef _WIN32
++        { /* FIBER_DUMP=1: every 3 s list this scheduler's fibers (diagnostic) */
++          static int en = -1; static ULONGLONG last = 0;
++          if (en < 0) en = getenv("FIBER_DUMP") ? 1 : 0;
++          if (en && GetTickCount64() - last > 3000) { last = GetTickCount64();
++              static const char* nm[] = {"READY","RUNNING","WAIT_SIGNAL","WAIT_JOIN","DONE","WAIT_FLAG"};
++              fprintf(stderr, "[fibers] sched=%08X\n", s->ea);
++              for (Fiber* g = s_fibers; g; g = g->next) if (g->sched == s)
++                  fprintf(stderr, "[fibers]   ea=%08X opd=%08X prio=%u %s sigpend=%d\n", g->ea, g->opd, g->priority, nm[g->state], g->signal_pending); } }
++#endif
+         Fiber* f = pick_runnable(s);
+         if (!f) {
+             if (all_done(s)) break;
+-            WAIT();              /* its fibers wait for a signal, or a join, that another thread delivers */
++            { int wf = 0; for (Fiber* g = s_fibers; g; g = g->next) if (g->sched == s && g->state == F_WAIT_FLAG) wf = 1;
++              if (wf) break; }   /* flag waiters are re-polled by the next RunFibers call (guest waker runs outside) */
++            WAIT();            /* its fibers wait for a signal, or a join, that another thread delivers */
+             continue;
+         }
+         f->state = F_RUNNING;
+@@ -471,6 +487,21 @@ s32 cellFiberPpuWaitSignal(void)
+     return CELL_OK;
+ }
+ 
++/* Real WaitFlag: park the fiber until *flag == value; RunFibers returns when nothing else can run.
++ * Returns 0 when parked and resumed, nonzero if not inside a fiber. */
++s32 cellFiberPpuWaitFlagEx(u32 flag_ea, u32 value)
++{
++    Fiber* f = t_cur;
++    if (!f) return (s32)CELL_FIBER_ERROR_PERM;
++    if (vm_read32(flag_ea) == value) return CELL_OK;
++    LOCK();
++    f->flag_ea = flag_ea; f->flag_val = value;
++    f->state = F_WAIT_FLAG;
++    UNLOCK();
++    host_yield(f);
++    return CELL_OK;
++}
++
+ s32 cellFiberPpuSendSignal(CellFiberPpu* fiber, u32* numWorker)
+ {
+     const u32 ea = (u32)(uintptr_t)fiber;
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+index b09220e2..a2bed3a3 100644
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -944,8 +944,8 @@ s32 cellSpursAttachLv2EventQueue(CellSpurs* spurs, u32 queue, u8* port,
+         return CELL_SPURS_CORE_ERROR_BUSY;
+     }
+     s_spurs_port_queue[p] = queue;
+-    printf("[cellSpurs] AttachLv2EventQueue(queue=%u) port=%u%s\n", queue, p,
+-           isDynamic ? " (dynamic)" : "");
++    printf("[cellSpurs] AttachLv2EventQueue(spurs=0x%08X queue=%u) port=%u%s\n",
++           (u32)(uintptr_t)spurs, queue, p, isDynamic ? " (dynamic)" : "");
+     ReleaseSRWLockExclusive(&s_spurs_queue_lock);
+     return CELL_OK;
+ }
+@@ -2054,6 +2054,12 @@ static DWORD WINAPI spurs_kernel_thread(LPVOID p)
+             for (u32 checked = 0; checked < nwid; checked++) {
+                 u32 wid = si->cursor % nwid;
+                 si->cursor = (wid + 1) % nwid;
++                if (getenv("SPURS_W5DIAG") && wid == 5 && sn == 0 && (si->pass_no % 400) == 1)
++                    fprintf(stderr, "[w5diag] en=%d state=%u in_use=%d ea_ok=%d prio=%u maxc=%u act=%u ready=%u sig=0x%x flag=0x%x recv=%u\n",
++                        !!(enabled & (0x80000000u >> wid)), vm_read8(ea + wkl_state_off(wid)), s_workloads[wid].in_use,
++                        s_workloads[wid].spurs_ea == ea, vm_read8(ea + wkl_info_off(wid) + 0x18 + sn),
++                        wkl_count_get(ea, SPURS_WKL_MAXCONT, wid, si->is2), si->active[wid], vm_read8(ea + wkl_ready_off(wid)),
++                        vm_read16(ea + wkl_signal_off(wid)), vm_read32(ea + SPURS_WKL_FLAG_WORD), vm_read8(ea + SPURS_WKL_FLAG_RECV));
+                 if (!(enabled & (0x80000000u >> wid)) ||
+                     vm_read8(ea + wkl_state_off(wid)) != 2 ||
+                     !s_workloads[wid].in_use || s_workloads[wid].spurs_ea != ea)
+@@ -2568,14 +2574,25 @@ enum {
+ /* Host-side jobchain registry (the CellSpursJobChain guest struct is opaque
+  * to the game; we track what we need beside it). */
+ #define MAX_JOBCHAINS 32
+-static struct {
++struct JcSlot {
+     u32 jc_ea;        /* CellSpursJobChain EA (0 = free) */
++    u32 spurs_ea;     /* owning CellSpurs instance (0 = unknown) */
+     u32 entry_ea;     /* first command word EA */
+     u16 size_desc;
+     u16 max_grab;
+     int run_count;
+     volatile long running;   /* 1 while a host thread walks this chain */
+-} s_jobchains[MAX_JOBCHAINS];
++};
++static struct JcSlot s_jobchains[MAX_JOBCHAINS];
++
++/* The chain record, or NULL. Callers only read immutable fields after the
++ * record is published by jc_register. */
++static struct JcSlot* jc_find(u32 jc_ea)
++{
++    for (int i = 0; i < MAX_JOBCHAINS; i++)
++        if (s_jobchains[i].jc_ea == jc_ea) return &s_jobchains[i];
++    return NULL;
++}
+ 
+ static void jc_dump_commands(const char* tag, u32 ea, int max_words)
+ {
+@@ -2631,12 +2648,13 @@ s32 cellSpursJobChainAttributeSetName(u64 attr_ea, u64 name_ea)
+ }
+ 
+ /* Register (or re-register) a job chain handle. Shared by both Create forms. */
+-static s32 jc_register(u32 jc_ea, u32 entry_ea, u16 size_desc, u16 max_grab,
+-                       const char* who)
++static s32 jc_register(u32 jc_ea, u32 spurs_ea, u32 entry_ea, u16 size_desc,
++                       u16 max_grab, const char* who)
+ {
+     for (int i = 0; i < MAX_JOBCHAINS; i++) {
+         if (!s_jobchains[i].jc_ea || s_jobchains[i].jc_ea == jc_ea) {
+             s_jobchains[i].jc_ea     = jc_ea;
++            s_jobchains[i].spurs_ea  = spurs_ea;
+             s_jobchains[i].entry_ea  = entry_ea;
+             s_jobchains[i].size_desc = size_desc;
+             s_jobchains[i].max_grab  = max_grab;
+@@ -2670,12 +2688,12 @@ s32 cellSpursCreateJobChainWithAttribute(u64 spurs_ea, u64 jc_ea, u64 attr_ea)
+         }
+         _n++;
+     }
+-    printf("[cellSpurs] CreateJobChainWithAttribute(jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u name=\"%s\")\n",
+-           (u32)jc_ea, entry, sd_mg >> 16, sd_mg & 0xFFFFu,
++    printf("[cellSpurs] CreateJobChainWithAttribute(spurs=0x%08X jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u name=\"%s\")\n",
++           (u32)spurs_ea, (u32)jc_ea, entry, sd_mg >> 16, sd_mg & 0xFFFFu,
+            name_ea ? (const char*)(vm_base + name_ea) : "-");
+ 
+-    return jc_register((u32)jc_ea, entry, (u16)(sd_mg >> 16), (u16)(sd_mg & 0xFFFFu),
+-                       "CreateJobChainWithAttribute");
++    return jc_register((u32)jc_ea, (u32)spurs_ea, entry, (u16)(sd_mg >> 16),
++                       (u16)(sd_mg & 0xFFFFu), "CreateJobChainWithAttribute");
+ }
+ 
+ /* cellSpursCreateJobChain -- the no-attribute form, and the one the WWS job
+@@ -2697,20 +2715,21 @@ s32 cellSpursCreateJobChain(u64 spurs_ea, u64 jc_ea, u64 entry_ea,
+                             u64 prio_ea, u32 maxContention,
+                             u32 autoRequestSpuCount)
+ {
+-    (void)spurs_ea; (void)prio_ea;
++    (void)prio_ea;
+     if (!jc_ea) return CELL_SPURS_TASK_ERROR_NULL_POINTER;
+ 
+     static int _n = 0;
+     if (PS3_LOG_FIRST(_n, 3)) {
+-        printf("[cellSpurs] CreateJobChain(jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u "
++        printf("[cellSpurs] CreateJobChain(spurs=0x%08X jc=0x%08X entry=0x%08X sizeDesc=%u maxGrab=%u "
+                "maxCont=%u autoReq=%u)\n",
+-               (u32)jc_ea, (u32)entry_ea, sizeJobDescriptor, maxGrabbedJob,
++               (u32)spurs_ea, (u32)jc_ea, (u32)entry_ea, sizeJobDescriptor, maxGrabbedJob,
+                maxContention, autoRequestSpuCount);
+         if (entry_ea && (u32)entry_ea < 0x10000000u)
+             jc_dump_commands("CreateJobChain", (u32)entry_ea, 16);
+     }
+-    return jc_register((u32)jc_ea, (u32)entry_ea, (u16)sizeJobDescriptor,
+-                       (u16)maxGrabbedJob, "CreateJobChain");
++    return jc_register((u32)jc_ea, (u32)spurs_ea, (u32)entry_ea,
++                       (u16)sizeJobDescriptor, (u16)maxGrabbedJob,
++                       "CreateJobChain");
+ }
+ 
+ /* ---------------------------------------------------------------------------
+@@ -2958,8 +2977,29 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+      *     while (i + 1 < queued);
+      * so a data2 pinned at 0 never ends that loop -- with the chain's lwmutex
+      * held, which blocks the main thread's teardown behind it. A chain-level
+-     * signal (job_index < 0) sends 0. */
++     * signal (job_index < 0) sends 0.
++     *
++     * The index MUST stay inside the winning batch, though. The SPURS contract
++     * only ever has maxGrabbedJob jobs outstanding, so an index is in
++     * [0, maxGrabbedJob). Our host walker can lap a service chain more often
++     * than the title has slots (guard notifications keep arriving), and the
++     * old raw `jobs++` counter then selected past the end of the receiver's
++     * handler table. GT6's "Spu Event Handler" (func_00A569D0) has 16 entries;
++     * a completion with data2=52 indexed obj+0x1A4, read 0xFFFF as an OPD and
++     * bctrl'd to 0x007F454C. Wrap the index by the chain's maxGrabbedJob. */
++    struct JcSlot* jc = jc_find(jc_ea);
+     u64 d2 = (u64)(unsigned)(job_index < 0 ? 0 : job_index);
++    u32 max_grab = jc ? jc->max_grab : 0;
++    static int s_index_raw = -1;
++    if (s_index_raw < 0) s_index_raw = getenv("SPURS_JC_INDEX_RAW") ? 1 : 0;
++    if (!s_index_raw && job_index >= 0 && max_grab > 0 && (u32)job_index >= max_grab) {
++        static int _wrap = 0;
++        if (PS3_LOG_FIRST(_wrap, 8))
++            printf("[cellSpurs] chain 0x%08X completion index %d >= maxGrabbedJob=%u "
++                   "-- wrapping to %u (receiver has one handler slot per job slot)\n",
++                   jc_ea, job_index, max_grab, (u32)job_index % max_grab);
++        d2 = (u64)((u32)job_index % max_grab);
++    }
+     u64 mbox = 0, d3 = 0;
+     (void)spurs_event_data3_probe();   /* prime d3_probe_valid */
+     /* A PPU-side query submits a job and reads the reply out of the completion
+@@ -2985,8 +3025,26 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+         d3 = g_spurs_job_mbox_intr; (void)d3;
+         g_spurs_job_mbox_valid = 0;
+     }
+-    for (int i = 0; i < s_spurs_event_queue_n; i++) {
+-        int rc = sys_event_queue_push_by_id(s_spurs_event_queue[i],
++    /* Route the completion only to queues attached to the instance that owns
++     * this chain. The old code walked the process-global attached-queue list,
++     * so a chain on the second (1-SPU) instance woke the PDI instance's "Spu
++     * Event Handler" too; that handler's table has only a couple of registered
++     * slots and was never meant to see these job indices. Owner 0 means the
++     * queue predates owner tracking -- keep the old broadcast for it. */
++    static int s_legacy_route = -1;
++    if (s_legacy_route < 0) s_legacy_route = getenv("SPURS_JC_LEGACY_ROUTE") ? 1 : 0;
++    u32 queues[MAX_SPURS_QUEUES];
++    int nq = 0;
++    AcquireSRWLockShared(&s_spurs_queue_lock);
++    for (int i = 0; i < s_spurs_event_queue_n && nq < MAX_SPURS_QUEUES; i++) {
++        u32 owner = s_spurs_event_queue_owner[i];
++        if (!s_legacy_route && jc && jc->spurs_ea && owner && owner != jc->spurs_ea) continue;
++        queues[nq++] = s_spurs_event_queue[i];
++    }
++    ReleaseSRWLockShared(&s_spurs_queue_lock);
++
++    for (int i = 0; i < nq; i++) {
++        int rc = sys_event_queue_push_by_id(queues[i],
+                                             SPURS_EVENT_PORT, jc_ea, d2,
+                                             d3_probe_valid
+                                                 ? spurs_event_data3_probe()
+@@ -2995,7 +3053,7 @@ static void jc_signal_done(u32 jc_ea, int job_index)
+         if (PS3_LOG_FIRST(n, 8))
+             printf("[cellSpurs] chain 0x%08X job %d done -> event queue %u "
+                    "(data2=%llu rc=%d)\n",
+-                   jc_ea, job_index, s_spurs_event_queue[i],
++                   jc_ea, job_index, queues[i],
+                    (unsigned long long)d2, rc);
+     }
+ }
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index f073f327..843f968c 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -152,6 +152,7 @@ int cellGcm_take_flip_pending(void)
+ {
+     int v = s_flip_pending;
+     s_flip_pending = 0;
++    if (v) fprintf(stderr, "[takeflip] 1 (present)\n");
+     return v;
+ }
+ 
+@@ -2198,6 +2199,17 @@ static int gcm_legacy_method_has_effect(u32 m)
+     case 0x0050u: case 0x0104u: case 0x0180u: case 0x01A4u:
+     case 0x1D6Cu: case 0x1D70u: case 0x1D74u:
+         return 1;
++    /* Draw submission must never be gated out. SET_BEGIN_END flushes dirty
++     * state to the backend and DRAW_ARRAYS/DRAW_INDEX_ARRAY are the only
++     * methods that produce a draw; dropping them when the legacy state is not
++     * "live" (a vtable backend plus the draw engine, or a diagnostic rebuild)
++     * leaves a title that only clears. They are cheap and idempotent when no
++     * backend is registered. */
++    case 0x1808u:   /* NV4097_SET_BEGIN_END */
++    case 0x1814u:   /* NV4097_DRAW_ARRAYS */
++    case 0x1818u:   /* NV4097_INLINE_ARRAY */
++    case 0x1824u:   /* NV4097_DRAW_INDEX_ARRAY */
++        return 1;
+     default:
+         return 0;
+     }
+@@ -2230,6 +2242,19 @@ static int gcm_word_diag(void)
+ static void gcm_3d_method(rsx_state* st, u32 m, u32 v, int legacy_state_live)
+ {
+     extern u32 g_rsx_last_reference;
++    /* GCM_DRAWPROBE=1: the authoritative "the decoder saw it" line. The raw
++     * range scan in gcm_drawprobe_pass() catches words the walker skips; this
++     * one only fires when the method actually reaches the decode gate. */
++    { static int pd = -1;
++      if (pd < 0) pd = getenv("GCM_DRAWPROBE") ? 1 : 0;
++      if (pd && (m == 0x1814u || m == 0x1818u || m == 0x181Cu || m == 0x1824u ||
++                 m == 0x1880u || m == 0x1884u || m == 0x1C00u || m == 0x1C0Cu)) {
++          static int pn = 0;
++          if (pn < 64) { pn++;
++              fprintf(stderr, "[DRAWPROBE] method io=0x%08X m=0x%04X v=0x%08X%s\n",
++                      s_fifo_getoff, m, v, legacy_state_live ? "" : " (legacy-gated)");
++          }
++      } }
+     /* #466: rsx_state feeds only the legacy vtable backend. With the draw
+      * engine up and no vtable registered, the state it builds is never read,
+      * so only the methods with effects outside it are worth handing over.
+@@ -2310,6 +2335,78 @@ static int gcm_report_hold(void)
+     return 0;
+ }
+ 
++/* GCM_DRAWPROBE=1: read-only probe for the first real draw submission.
++ *
++ * It logs (a) the guest context GT6's static libgcm uses at 0x016A6200, the
++ * HLE context, and the out-pointer; and (b) every FIFO header in the drained
++ * [get, put) range whose method is DRAW_ARRAYS (0x1814), INLINE_ARRAY
++ * (0x1818), SET_INDEX_ARRAY_ADDRESS (0x181C) or DRAW_INDEX_ARRAY (0x1824),
++ * with its count/subchannel and the first data words. It never writes guest
++ * memory and never injects a command: a missing line means the guest did not
++ * publish the method, not that the probe altered the stream.
++ *
++ * The raw scan is a fallback for words the walker might skip (resync, park,
++ * malformed header). The per-method log in gcm_3d_method below is the
++ * authoritative "the decoder saw it" line; compare the two. */
++#define GCM_DRAWPROBE_CTX_EA 0x016A6200u   /* GT6 static-libgcm context */
++static void gcm_drawprobe_pass(u32 put)
++{
++    static int on = -1;
++    if (on < 0) on = getenv("GCM_DRAWPROBE") ? 1 : 0;
++    if (!on) return;
++
++    static int ctx_logged = 0;
++    if (!ctx_logged) {
++        ctx_logged = 1;
++        const u32 out_ea = s_gcm_ctx_out_ea;
++        const u32 ptr = out_ea ? vm_read32(out_ea) : 0;
++        const u32 g = GCM_DRAWPROBE_CTX_EA;
++        fprintf(stderr,
++                "[DRAWPROBE] ctx_out@0x%08X -> 0x%08X (begin=%08X end=%08X current=%08X) "
++                "gt6@0x%08X (begin=%08X end=%08X current=%08X) hle=0x%08X\n",
++                out_ea, ptr,
++                ptr ? vm_read32(ptr + 0) : 0, ptr ? vm_read32(ptr + 4) : 0,
++                ptr ? vm_read32(ptr + 8) : 0,
++                g, vm_read32(g + 0), vm_read32(g + 4), vm_read32(g + 8),
++                s_gcm_context_ea);
++        fflush(stderr);
++    }
++
++    static u32 last_put = 0xFFFFFFFFu, last_get = 0xFFFFFFFFu;
++    if (put == last_put && s_fifo_getoff == last_get) return;
++    last_put = put; last_get = s_fifo_getoff;
++
++    int shown = 0;
++    u32 io = s_fifo_getoff;
++    u32 limit = put;
++    if (limit > io + 0x100000u) limit = io + 0x100000u;   /* same cap as the walker */
++    while (io + 4u <= limit && shown < 16) {
++        const u32 ea = gcm_io2ea(io);
++        if (!ea) { io += 4u; continue; }
++        const u32 w = vm_read32(ea);
++        const u32 type = w >> 29;
++        if (type == 0 || type == 2) {
++            const u32 m = w & 0x1FFCu;
++            const u32 count = (w >> 18) & 0x7FFu;
++            if (m == 0x1814u || m == 0x1818u || m == 0x181Cu || m == 0x1824u ||
++                m == 0x1880u || m == 0x1884u || m == 0x1C00u || m == 0x1C0Cu) {
++                fprintf(stderr, "[DRAWPROBE] hdr io=0x%08X w=0x%08X sub=%u m=0x%04X count=%u data=",
++                        io, w, (w >> 13) & 7u, m, count);
++                for (u32 i = 0; i < count && i < 4u; i++) {
++                    const u32 dea = gcm_io2ea(io + 4u + i * 4u);
++                    fprintf(stderr, "%s0x%08X", i ? " " : "", dea ? vm_read32(dea) : 0xDEADDEADu);
++                }
++                fprintf(stderr, "\n");
++                shown++;
++                io += 4u + count * 4u;
++                continue;
++            }
++        }
++        io += 4u;
++    }
++    if (shown) fflush(stderr);
++}
++
+ /* The diagnostic switches below are tested on every drain pass, and GCM_RECDBG
+  * on every semaphore method. getenv walks the whole environment and showed in
+  * RSX-thread profiles, so each is read once and cached, like the other knobs. */
+@@ -2350,7 +2447,6 @@ static void gcm_rsx_process_fifo_unlocked(void)
+     const int legacy_state_live = rsx_get_backend() != NULL || !rsx_draw_engine_enabled() ||
+                                   s_rsx_trace;
+ 
+-
+     /* Walk the FIFO exactly like the RSX: chase the guest-written `put` (an IO
+      * offset in the control register), decoding method headers and following
+      * JUMP/CALL/RET control words. The old linear drain copied context->current
+@@ -2367,6 +2463,10 @@ static void gcm_rsx_process_fifo_unlocked(void)
+      * word that is not a command, and parks there forever. */
+     atomic_thread_fence(memory_order_acquire);
+ 
++    /* GCM_DRAWPROBE=1: read-only context/drained-range probe. No writes, no
++     * synthetic commands; see the comment on gcm_drawprobe_pass(). */
++    gcm_drawprobe_pass(put);
++
+     /* GCM_CTXDBG=1: which context the title is actually driving. Ours is written
+      * once at init; if the title repoints gCellGcmCurrentContext at a buffer of
+      * its own, every field below moves with it and the FIFO the runtime walks
+@@ -3550,29 +3650,33 @@ s32 cellGcmSetFlipCommandWithWaitLabel(u32 bufferId, u32 labelIndex, u32 labelVa
+ /* NID: 0xA2478CA3 */
+ s32 cellGcmSetPrepareFlip(void* ctx, u32 bufferId)
+ {
+-    (void)ctx;  /* command buffer context -- not used in HLE */
+-
+     if (bufferId >= CELL_GCM_MAX_DISPLAY_BUFFER_NUM)
+         return CELL_GCM_ERROR_INVALID_VALUE;
+-
+     if (!s_display_buffer_set[bufferId])
+         return CELL_GCM_ERROR_INVALID_VALUE;
+ 
+     printf("[cellGcmSys] SetPrepareFlip(bufferId=%u)\n", bufferId);
+ 
+-    gcm_set_current_display_buffer(bufferId);
+-    s_flip_status = CELL_GCM_FLIP_STATUS_DONE;
+-    s_flip_request_count++;
+-    s_last_flip_time = get_timestamp_ns();
+-
+-    /* Invoke the guest flip handler via OPD resolution -- s_flip_handler holds
+-     * the raw guest OPD (e.g. 0x530D70); calling it as a host function pointer
+-     * jumps into guest code and crashes. See cellGcmSetFlipCommand for why
+-     * GCM_FLIPCB_ONTICK exists. */
+-    if (s_flip_handler_opd && g_ps3_guest_caller && !gcm_flipcb_on_tick_only())
+-        g_ps3_guest_caller(s_flip_handler_opd, 0, 0, 0, 0, 0, 0, 0, 0);
+-
+-    return CELL_OK;
++    /* GT6 uses the caller's CellGcmContextData (0x016A6200), not the context
++     * _cellGcmInitBody created. Queue the flip into that context the same way
++     * _cellGcmSetFlipCommand does, then publish the guest's `current` as the
++     * FIFO put so the drain reaches the marker this frame. Without this the
++     * guest's next command overwrote the flip slot and no Present ever ran. */
++    /* GT6's CellGcmContextData uses an RSX IO address (0x70ABE44C), not the
++     * runtime's command ring, so an in-FIFO marker is never seen by the drain.
++     * Request the flip directly: the present ticker presents the batch the
++     * drain has already executed. */
++    (void)ctx;
++    {
++        s32 rc = cellGcmSetFlipCommand(bufferId);
++        /* libgcm's SetPrepareFlip returns the prepared buffer id, not CELL_OK.
++         * GT6 uses the return value to order subsequent buffer preparation. */
++        return (rc == CELL_OK) ? (s32)bufferId : rc;
++    }
++
++    /* No mapped command buffer / no room: keep the immediate path so the
++     * ticker still presents instead of leaving the window unpainted. */
++    return cellGcmSetFlipCommand(bufferId);
+ }
+ 
+ /* NID: 0x1BFAB6EE */
+diff --git a/libs/video/rsx_commands.c b/libs/video/rsx_commands.c
+index a39639f1..ace54952 100644
+--- a/libs/video/rsx_commands.c
++++ b/libs/video/rsx_commands.c
+@@ -15,6 +15,7 @@
+  */
+ 
+ #include "rsx_commands.h"
++#include "rsx_vertex_formats.h"  /* rsx_vertex_attrib_size for INLINE_ARRAY */
+ #include "ps3emu/milestone.h"   /* ps3_ms -- boot milestone log */
+ #include <stdio.h>
+ #include <stdlib.h>   /* getenv -- an implicit decl returns int, truncating the pointer */
+@@ -28,12 +29,27 @@
+ 
+ static rsx_backend* s_backend = NULL;
+ 
++/* ppu_memory.h normally declares this; rsx_commands.c only includes vm.h. */
++extern void vm_write32(uint32_t a, uint32_t v);
++
+ /* Last NV406E_SET_REFERENCE value seen in the FIFO. The title writes a
+  * reference then spins on the GCM control register's `ref` field until the RSX
+  * reports it as reached; cellGcmSys mirrors this into the guest control
+  * register after each drain so those waits (cellGcmFinish / wait-label) unblock. */
+ u32 g_rsx_last_reference = 0;
+ 
++/* RSX_DRAWDBG diagnostics. These count what the FIFO decoder actually saw,
++ * separately from what the guest was supposed to submit and from what the
++ * backend recorded. A run with clears but all three zero means the guest never
++ * wrote a draw command (see docs/analysis/rsx-first-draw-fix.md); a nonzero
++ * decode count with zero backend calls means the backend is missing or the
++ * draw method was gated out. Always maintained: the cost is two increments. */
++u64 g_rsx_draw_arrays_decoded = 0;
++u64 g_rsx_draw_index_decoded = 0;
++u64 g_rsx_draw_backend_calls = 0;
++u64 g_rsx_inline_decoded = 0;
++u64 g_rsx_immediate_draws = 0;
++
+ void rsx_set_backend(rsx_backend* backend)
+ {
+     s_backend = backend;
+@@ -324,6 +340,8 @@ static int process_vertex_attrib_method(rsx_state* state, u32 method, u32 data)
+          * it is NOT using -- so the input layout was built from 16 attributes of
+          * which most were degenerate, and the draws rasterized nothing. */
+         attr->enabled   = (attr->size != 0);
++        { static int _d = -1; static int _n = 0; if (_d < 0) _d = getenv("A3FMT_DBG") ? 1 : 0;
++          if (_d && index == 3 && _n < 300) { _n++; fprintf(stderr, "[A3FMT] data=0x%08X epoch=%u\n", data, (unsigned)state->begin_epoch); } }
+         attr->format    = data;
+         state->vertex_dirty = 1;
+         return 0;
+@@ -431,6 +449,185 @@ int rsx_process_vp_run(rsx_state* state, u32 method, const u8* src, u32 count)
+     return 0;
+ }
+ 
++/* INLINE_ARRAY (NV4097_INLINE_ARRAY, 0x1818): the vertex stream travels in the
++ * FIFO itself, not in a vertex array. The layout is the ordinary VTXFMT
++ * declaration: enabled attributes packed in ascending index order, one vertex
++ * every `stride` bytes. `rsx_dispatch.c` implements this for the draw engine;
++ * the legacy rsx_state path needs the same accumulation so a title that uses
++ * the method does not lose the whole stream as "unknown method".
++ *
++ * The legacy D3D12 rsx_backend has no inline-array sink, so this path validates
++ * the stream and computes the vertex count (the part the decoder owns) but
++ * cannot rasterize it. The draw engine path (RSX_LIVE_DRAW /
++ * PS3RECOMP_RSX_ENGINE=dispatch) does have a sink and is the path to use for a
++ * title that actually draws this way. */
++#define RSX_INLINE_MAX_BYTES 65536u
++static u8  s_inline_data[RSX_INLINE_MAX_BYTES];
++static u32 s_inline_len;
++static rsx_state* s_inline_owner;
++
++static void rsx_inline_reset(rsx_state* state)
++{
++    s_inline_len = 0;
++    s_inline_owner = state;
++}
++
++static u32 rsx_inline_stride(const rsx_state* state)
++{
++    u32 packed = 0, declared = 0;
++    for (u32 i = 0; i < RSX_MAX_VERTEX_ATTRIBS; i++) {
++        const rsx_vertex_attrib* a = &state->vertex_attribs[i];
++        if (!a->type || !a->size) continue;
++        packed += rsx_vertex_attrib_size(a->type, a->size);
++        if (a->stride > declared) declared = a->stride;
++    }
++    return declared ? declared : packed;
++}
++
++static void rsx_inline_finish(rsx_state* state)
++{
++    if (!s_inline_len) return;
++    const u32 stride = rsx_inline_stride(state);
++    const u32 count = stride ? s_inline_len / stride : 0;
++    ++g_rsx_inline_decoded;
++    { static int n = 0; if (PS3_LOG_FIRST(n, 32))
++        fprintf(stderr, "[RSX] INLINE_ARRAY prim=%u bytes=%u stride=%u count=%u\n",
++                state->primitive_type, s_inline_len, stride, count); }
++    s_inline_len = 0;
++}
++
++/* Immediate-mode vertices (SET_BEGIN_END(prim), then DATA2F x/y writes, then
++ * SET_BEGIN_END(0)). GT6's first frame is exactly this: 10 vertices of a
++ * triangle strip, each completed by attr0's Y write (0x1884). The current
++ * register value for every attribute is snapshotted at that point, matching
++ * rsx_dispatch.c's immediate_vertex rule. The legacy D3D12 backend reads
++ * vertices from an array, not from the FIFO, so at END the snapshot is copied
++ * to a temporary local-memory vertex buffer and attr0 is redirected there for
++ * the duration of the draw callback. The title's real attr0 is restored
++ * afterwards.
++ *
++ * The scratch is the top 64 KiB of the 256 MB local window (offset
++ * 0x0FF00000). GT6's first frame uses display buffers <= 0x01980000, so this
++ * cannot collide with them; a future allocator-aware version should reserve
++ * it through the local-memory map instead of hardcoding the tail. */
++#define RSX_IMMEDIATE_MAX_VERTS 4096u
++#define RSX_IMMEDIATE_SCRATCH   0x0FF00000u
++static float s_immediate[RSX_IMMEDIATE_MAX_VERTS][4];
++static float s_immediate_tc[RSX_IMMEDIATE_MAX_VERTS][4];
++#define RSX_IMMEDIATE_SCRATCH_TC 0x0FF40000u
++static u32   s_immediate_count;
++
++static void rsx_immediate_reset(void)
++{
++    s_immediate_count = 0;
++}
++
++static void rsx_immediate_push(rsx_state* state)
++{
++    if (!state->in_begin_end) return;
++    if (s_immediate_count >= RSX_IMMEDIATE_MAX_VERTS) return;
++    memcpy(s_immediate[s_immediate_count], state->vertex_data4f[0], 16);
++    memcpy(s_immediate_tc[s_immediate_count], state->vertex_data4f[8], 16);
++    { static int pd = -1;
++      if (pd < 0) pd = getenv("GCM_DRAWPROBE") ? 1 : 0;
++      if (pd) { static int n = 0;
++          if (n < 16) { n++;
++              const float* p = state->vertex_data4f[0];
++              const float* c = state->vertex_data4f[3];
++              const float* t = state->vertex_data4f[8];
++              fprintf(stderr,
++                  "[DRAWPROBE] vtx %u pos=(%.3f,%.3f,%.3f,%.3f) "
++                  "col=(%.3f,%.3f,%.3f,%.3f) tc0=(%.3f,%.3f,%.3f,%.3f)\n",
++                  s_immediate_count, p[0], p[1], p[2], p[3],
++                  c[0], c[1], c[2], c[3], t[0], t[1], t[2], t[3]);
++          } } }
++    s_immediate_count++;
++}
++
++static void rsx_immediate_finish(rsx_state* state)
++{
++    if (!s_immediate_count) return;
++    const u32 count = s_immediate_count;
++    ++g_rsx_immediate_draws;
++    { static int n = 0; if (PS3_LOG_FIRST(n, 32))
++        fprintf(stderr, "[RSX] IMMEDIATE prim=%u count=%u (DATA2F triangle strip)\n",
++                state->primitive_type, count); }
++    { static int pd = -1;
++      if (pd < 0) pd = getenv("GCM_DRAWPROBE") ? 1 : 0;
++      if (pd) {
++          extern int cellGcmOffsetIsDisplay(u32 offset);
++          const rsx_vertex_attrib* a0 = &state->vertex_attribs[0];
++          const rsx_vertex_attrib* a3 = &state->vertex_attribs[3];
++          const rsx_vertex_attrib* a8 = &state->vertex_attribs[8];
++          const u32 surf0 = state->surface_color_offset[0];
++          fprintf(stderr,
++              "[DRAWPROBE] imm finish prim=%u count=%u surf0=0x%X display=%d "
++              "clip=%ux%u vp_bytes=%u vp_load=%u fp=0x%X "
++              "c0=%.3f,%.3f,%.3f,%.3f c1=%.3f,%.3f,%.3f,%.3f "
++              "attr0(en=%d sz=%u off=0x%X) "
++              "attr3(en=%d sz=%u off=0x%X const=%.3f,%.3f,%.3f,%.3f) "
++              "attr8(en=%d sz=%u off=0x%X const=%.3f,%.3f,%.3f,%.3f)\n",
++              state->primitive_type, count, surf0,
++              cellGcmOffsetIsDisplay(surf0),
++              state->surface_clip_w, state->surface_clip_h,
++              state->vp_ucode_bytes, state->transform_program_load,
++              state->shader_program,
++              state->vertex_constants[0][0], state->vertex_constants[0][1],
++              state->vertex_constants[0][2], state->vertex_constants[0][3],
++              state->vertex_constants[1][0], state->vertex_constants[1][1],
++              state->vertex_constants[1][2], state->vertex_constants[1][3],
++              a0->enabled, a0->size, a0->offset,
++              a3->enabled, a3->size, a3->offset,
++              state->vertex_data4f[3][0], state->vertex_data4f[3][1],
++              state->vertex_data4f[3][2], state->vertex_data4f[3][3],
++              a8->enabled, a8->size, a8->offset,
++              state->vertex_data4f[8][0], state->vertex_data4f[8][1],
++              state->vertex_data4f[8][2], state->vertex_data4f[8][3]);
++      } }
++
++    if (s_backend && s_backend->draw_arrays) {
++        extern u32 cellGcmResolveLocated(int local, u32 offset);
++        extern uint8_t* vm_base;
++        /* Big-endian float4 position, stride 16. */
++        /* Same resolution rsx_fetch_attrib uses for a LOCAL (bit31=0) array. */
++        const u32 base = cellGcmResolveLocated(1, RSX_IMMEDIATE_SCRATCH);
++        if (base && vm_base) {
++            for (u32 i = 0; i < count; i++) {
++                for (u32 lane = 0; lane < 4; lane++) {
++                    u32 bits; memcpy(&bits, &s_immediate[i][lane], 4);
++                    vm_write32(base + i * 16u + lane * 4u, bits);
++                    memcpy(&bits, &s_immediate_tc[i][lane], 4);
++                    vm_write32(cellGcmResolveLocated(1, RSX_IMMEDIATE_SCRATCH_TC) + i * 16u + lane * 4u, bits);
++                }
++            }
++            /* The backend reads vertices from current_rsx_state, which is set
++             * by set_render_target on BEGIN_END. Re-state it so the temporary
++             * attr0 is visible even if the surface was already clean. */
++            if (s_backend->set_render_target)
++                s_backend->set_render_target(s_backend->userdata, state);
++            const rsx_vertex_attrib saved = state->vertex_attribs[0];
++            state->vertex_attribs[0].format    = 0x00001042u; /* f32x4, stride 16 */
++            state->vertex_attribs[0].offset    = RSX_IMMEDIATE_SCRATCH;
++            state->vertex_attribs[0].stride    = 16u;
++            state->vertex_attribs[0].size      = 4u;
++            state->vertex_attribs[0].type      = 2u;          /* float32 */
++            state->vertex_attribs[0].frequency = 0u;
++            state->vertex_attribs[0].enabled   = 1;
++
++            const rsx_vertex_attrib saved8 = state->vertex_attribs[8];
++            state->vertex_attribs[8].format = 0x00001042u; state->vertex_attribs[8].offset = RSX_IMMEDIATE_SCRATCH_TC;
++            state->vertex_attribs[8].stride = 16u; state->vertex_attribs[8].size = 4u; state->vertex_attribs[8].type = 2u;
++            state->vertex_attribs[8].frequency = 0u; state->vertex_attribs[8].enabled = 1;
++            ++g_rsx_draw_backend_calls;
++            s_backend->draw_arrays(s_backend->userdata, state->primitive_type, 0, count);
++
++            state->vertex_attribs[0] = saved;
++            state->vertex_attribs[8] = saved8;
++        }
++    }
++    s_immediate_count = 0;
++}
++
+ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+ {
+     /* RSX_TRACE=<N>: trace the first N methods (bare "1" keeps the old 250).
+@@ -796,6 +993,26 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         state->vertex_attrib_output_mask = data;
+         return 0;
+     }
++    /* NV4097_SET_VERTEX_DATA2F_M (0x1880): the constant/"current" value for
++     * each vertex attribute, two floats per attribute (x at 0x1880+attr*8,
++     * y at +4). GT6's first frame already streams this encoding
++     * (run3.err:22400-22419), and without it the x/y lanes stayed at the
++     * reset value. The z/w lanes keep rsx_state_init's defaults. */
++    if (method >= 0x1880u && method < 0x1880u + RSX_MAX_VERTEX_ATTRIBS * 8u) {
++        u32 idx  = (method - 0x1880u) >> 3;         /* attribute */
++        u32 lane = ((method - 0x1880u) >> 2) & 1;   /* x or y */
++        float f; memcpy(&f, &data, 4);
++        state->vertex_data4f[idx][lane] = f;
++        /* DATA2F carries x/y only; the canonical z/w are 0/1, as in
++         * rsx_dispatch.c's vtx_const_fold(). */
++        if (lane == 0) { state->vertex_data4f[idx][2] = 0.0f; state->vertex_data4f[idx][3] = 1.0f; }
++        /* Completing attr0's Y inside BEGIN_END emits one immediate vertex,
++         * exactly as rsx_dispatch.c's immediate_vertex rule does. This is the
++         * 10-vertex DATA2F triangle strip in GT6's first frame. */
++        if (idx == 0 && lane == 1) rsx_immediate_push(state);
++        return 0;
++    }
++
+     /* NV4097_SET_VERTEX_DATA4F_M (0x1C00): the constant/"current" value for each
+      * vertex attribute, 16 attributes x 4 floats. The hardware feeds this to
+      * every vertex when the attribute's ARRAY is disabled -- it is not zero.
+@@ -804,13 +1021,15 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+      * instead; its duck shader computes (lighting * col0) * texture + spec, so a
+      * zero col0 multiplies the texture away and the ducks rendered as a dim grey
+      * specular term only -- present in the framebuffer, invisible on screen.
+-     * SET_VERTEX_DATA2F/4UB/2S/4S are the other encodings of the same register
++     * SET_VERTEX_DATA4UB/2S/4S are the other encodings of the same register
+      * file; add them if a title needs them. */
+     if (method >= 0x1C00u && method < 0x1C00u + RSX_MAX_VERTEX_ATTRIBS * 16u) {
+         u32 idx  = (method - 0x1C00u) >> 4;         /* attribute */
+         u32 lane = ((method - 0x1C00u) >> 2) & 3;   /* x/y/z/w   */
+         float f; memcpy(&f, &data, 4);
+         state->vertex_data4f[idx][lane] = f;
++        /* DATA4F W completes an immediate vertex (same rule as rsx_dispatch). */
++        if (idx == 0 && lane == 3) rsx_immediate_push(state);
+         { static int _d = -1; if (_d < 0) _d = getenv("VDATA_DBG") ? 1 : 0;
+           static int _n = 0;
+           if (_d && _n < 400) { _n++;
+@@ -842,6 +1061,19 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+             state->primitive_type = data;
+             state->in_begin_end = 1;
+             state->begin_epoch++;
++            rsx_inline_reset(state);
++            rsx_immediate_reset();
++            /* EU language-select: the guest leaves a stale enabled a3 (col0) array (unrelated mesh data) on some draws.
++             * A3 (fmt 0x1445, s16x4) is a valid palette index only for the text-quad VS (fp 0x4E739C1: floor(v[3].x) indexes vp_c[]); for panel/background VS it is stale mesh data and col0 comes from
++             * VERTEX_DATA4F. A3KEEP=1 trusts every enabled a3 (old behaviour). */
++            {
++                static int _keep = -1; if (_keep < 0) _keep = getenv("A3KEEP") ? 1 : 0;
++                rsx_vertex_attrib* a0 = &state->vertex_attribs[0];
++                rsx_vertex_attrib* a3 = &state->vertex_attribs[3];
++                u8 want = (a3->size != 0);
++                if (want && !_keep && state->shader_program != 0x4E739C1 /* text quads: a3.x = palette index into vp_c[] */) want = 0;
++                if (a3->enabled != want) { a3->enabled = want; state->vertex_dirty = 1; }
++            }
+ 
+             /* Flush dirty state to backend before drawing */
+             if (s_backend) {
+@@ -884,15 +1116,51 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+                 state->texture_dirty = 0;
+             }
+         } else {
++            /* Immediate DATA2F/DATA4F vertices are complete at END: hand the
++             * snapshot to the backend before the fence that follows this
++             * method, so draw/clear/fence ordering is preserved. Then hand
++             * over any INLINE_ARRAY stream for the count/stride decode (the
++             * legacy backend has no inline sink; see rsx_inline_finish). */
++            rsx_immediate_finish(state);
++            rsx_inline_finish(state);
+             state->in_begin_end = 0;
+         }
+         return 0;
+     }
+ 
++    if (method == 0x1818u) {   /* NV4097_INLINE_ARRAY */
++        if (s_inline_owner != state) rsx_inline_reset(state);
++        if (s_inline_len + 4u <= RSX_INLINE_MAX_BYTES) {
++            /* Guest byte order, so the stream matches what a vertex array
++             * reader would see. */
++            s_inline_data[s_inline_len + 0] = (u8)(data >> 24);
++            s_inline_data[s_inline_len + 1] = (u8)(data >> 16);
++            s_inline_data[s_inline_len + 2] = (u8)(data >> 8);
++            s_inline_data[s_inline_len + 3] = (u8)data;
++            s_inline_len += 4;
++        } else {
++            /* A torn final vertex is worse than no draw. */
++            s_inline_len = 0;
++        }
++        return 0;
++    }
++
+     if (method == NV4097_DRAW_ARRAYS) {
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
++        ++g_rsx_draw_arrays_decoded;
+         { static int _d=0; if (PS3_LOG_FIRST(_d, 32)) fprintf(stderr, "[RSX] DRAW_ARRAYS prim=%u first=%u count=%u\n", state->primitive_type, first, count); }
++        /* RSX_DRAWDBG=1: prove the decoded command reached the dispatch site
++         * and show whether a backend callback is installed. Logs every draw
++         * (capped) rather than only the first 32, which is what a title that
++         * spends its first 32 on setup draws needs. */
++        { static int _dbg = -1; if (_dbg < 0) _dbg = getenv("RSX_DRAWDBG") ? 1 : 0;
++          if (_dbg) fprintf(stderr,
++              "[DRAWDBG] DRAW_ARRAYS prim=%u first=%u count=%u backend=%s cb=%s surf0=0x%X\n",
++              state->primitive_type, first, count,
++              s_backend ? "yes" : "no",
++              (s_backend && s_backend->draw_arrays) ? "yes" : "no",
++              state->surface_color_offset[0]); }
+         { static int _sq=0, _e=-1; if (_e < 0) _e = getenv("SEQ_DBG") ? 1 : 0; if (_e && PS3_LOG_FIRST(_sq, 500))
+             fprintf(stderr, "[SEQ] DRAW surf0=0x%X c256.x=%.4f c257.y=%.4f\n",
+                     state->surface_color_offset[0], state->vertex_constants[256][0],
+@@ -913,8 +1181,10 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+             }
+         }
+         ps3_ms("rsx:draw_arrays");
+-        if (s_backend && s_backend->draw_arrays)
++        if (s_backend && s_backend->draw_arrays) {
++            ++g_rsx_draw_backend_calls;
+             s_backend->draw_arrays(s_backend->userdata, state->primitive_type, first, count);
++        }
+         return 0;
+     }
+ 
+@@ -937,11 +1207,21 @@ int rsx_process_method(rsx_state* state, u32 method, u32 data)
+         /* [23:0] first index, [31:24] count-1 (same packing as DRAW_ARRAYS). */
+         u32 first = data & 0xFFFFFF;
+         u32 count = ((data >> 24) & 0xFF) + 1;
++        ++g_rsx_draw_index_decoded;
+         { static int _d=0; if (PS3_LOG_FIRST(_d, 8)) fprintf(stderr, "[RSX] DRAW_INDEX_ARRAY prim=%u first=%u count=%u idxoff=0x%X dma=0x%X\n", state->primitive_type, first, count, state->index_array_offset, state->index_array_dma); }
++        { static int _dbg = -1; if (_dbg < 0) _dbg = getenv("RSX_DRAWDBG") ? 1 : 0;
++          if (_dbg) fprintf(stderr,
++              "[DRAWDBG] DRAW_INDEX_ARRAY prim=%u first=%u count=%u backend=%s cb=%s surf0=0x%X\n",
++              state->primitive_type, first, count,
++              s_backend ? "yes" : "no",
++              (s_backend && s_backend->draw_indexed) ? "yes" : "no",
++              state->surface_color_offset[0]); }
+         ps3_ms("rsx:draw_indexed");
+-        if (s_backend && s_backend->draw_indexed)
++        if (s_backend && s_backend->draw_indexed) {
++            ++g_rsx_draw_backend_calls;
+             s_backend->draw_indexed(s_backend->userdata, state->primitive_type,
+                                     first, count);
++        }
+         return 0;
+     }
+ 
+diff --git a/libs/video/rsx_d3d12_backend.c b/libs/video/rsx_d3d12_backend.c
+index 854739e7..43078f18 100644
+--- a/libs/video/rsx_d3d12_backend.c
++++ b/libs/video/rsx_d3d12_backend.c
+@@ -1685,11 +1685,11 @@ static void rsx_capture_frame(u32 fi, u32 ndraws, u32 capidx)
+                         r->cc[0], r->cc[1], r->cc[2], r->cc[3]);
+             else {
+                 fprintf(mf, "op%03u DRAW  rt=0x%08X mrt=0x%X/0x%X/0x%X vp=%u,%u,%ux%u fp=0x%08X vs=%d "
+-                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X\n",
++                            "n=%u cmask=%X blend=%d bk=0x%X t0=0x%08X t1=0x%08X t2=0x%08X t3=0x%08X zeta=0x%08X zs=0x%llX\n",
+                         d, r->rt_off, r->rt_mrt[0], r->rt_mrt[1], r->rt_mrt[2],
+                         r->vp_x, r->vp_y, r->vp_w, r->vp_h,
+                         r->fp_addr, r->vs_idx, r->vertex_count, r->cmask, r->blend, r->blend_key,
+-                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw);
++                        r->tex[0].raw, r->tex[1].raw, r->tex[2].raw, r->tex[3].raw, r->zeta_off, (unsigned long long)r->zs_key);
+                 for (int u = 0; u < 4; u++)
+                     if (r->tex[u].set)
+                         fprintf(mf, "      t%d off=0x%08X fmt=0x%02X (%s%s) %ux%u remap=0x%04X\n", u,
+@@ -1942,6 +1942,8 @@ static int vp_get_vs(const rsx_state* st)
+     static char hlsl[262144];
+     int ni = rsx_vp_decompile(vuc, vlen, hlsl, sizeof hlsl);
+     if (ni <= 0) return -1;
++    if (getenv("VP_DUMPALL")) { char _n[96]; snprintf(_n, sizeof _n, "work/vsdump_%d.hlsl", s_d3d.vp_vs_n);
++        FILE* _f = fopen(_n, "w"); if (_f) { fwrite(hlsl, 1, strlen(hlsl), _f); fclose(_f); } }
+     if (getenv("VP_DUMP")) { static int _d=0; if (PS3_LOG_FIRST(_d, 4)) {
+         FILE* f = fopen("vp2_dump.hlsl", _d==1 ? "w" : "a");
+         if (f) { fprintf(f, "/* per-draw VS hash pending, %d instrs */%s%s", ni, hlsl, "\n"); fclose(f); } } }
+@@ -2602,6 +2604,21 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+         int _un = atoi(getenv("FP_TEX"));
+         if (_un < 0 || _un > 3) _un = 0;
+         char* rp = strstr(hlsl, "_po.c0 = ");
++        char* tailp = rp ? NULL : strstr(hlsl, "return (_o == _o) ? _o : (float4)0;");
++        if (tailp) {
++            /* Current decompiler output ends in a NaN-guarded return and has no
++             * "_po.c0 =" statement; end the program with the sample instead. */
++            char rep2[200];
++            snprintf(rep2, sizeof rep2,
++                     getenv("FP_TEX_UV")
++                       ? "return rsx_tex[%d].Sample(rsx_samp[%d], float2(0.5, 0.5));\n}\n"
++                       : "return rsx_tex[%d].Sample(rsx_samp[%d], input.tc0.xy);\n}\n",
++                     _un, _un);
++            fprintf(stderr, "[FP_TEX] program 0x%X rewritten to sample unit %d%c",
++                    fp_addr, _un, 10);
++            if ((size_t)(tailp - hlsl) + strlen(rep2) + 1 < sizeof(hlsl))
++                strcpy(tailp, rep2);
++        }
+         if (rp) {
+             char* semi = strchr(rp, ';');
+             if (semi) {
+@@ -2634,6 +2651,11 @@ static ID3D12PipelineState* vp_get_fp_pso(int vs_idx, u32 fp_addr, u32 blend, in
+     if (getenv("FP_FORCE")) {
+         char* rp = strstr(hlsl, "return r[0];");
+         if (rp) memcpy(rp, "return float4(1,0,1,1)", 23);
++        else if ((rp = strstr(hlsl, "return (_o == _o) ? _o : (float4)0;")) != NULL) {
++            static const char rep[] = "return float4(1,0,1,1);";
++            size_t n = sizeof("return (_o == _o) ? _o : (float4)0;") - 1;
++            memcpy(rp, rep, sizeof(rep) - 1); memset(rp + sizeof(rep) - 1, 32, n - (sizeof(rep) - 1));
++        }
+     }
+     ID3DBlob* pb = NULL; ID3DBlob* e = NULL;
+     HRESULT hr = D3DCompile(hlsl, strlen(hlsl), "guest_fp", NULL, NULL,
+@@ -3167,6 +3189,76 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+      * it by calling this rather than porting the loops again. */
+     rsx_texture_decode(mapped, pitch, vm_base + off, w, h, &tl,
+                        rsx_texture_argb_is_rgba());
++    /* TEXDUMP=<fmtlist hex, e.g. 86,88,A8>: dump the raw guest bytes of each
++     * distinct texture of those base formats (first 24) plus a DXT1/DXT5 decode
++     * to BMP (rgb + alpha) under RSX_CAP_DIR (or cwd). Diagnostic only. */
++    { static const char* td = (const char*)1;
++      if (td == (const char*)1) td = getenv("TEXDUMP");
++      if (td && _f == 0) {
++        char want[16]; snprintf(want, sizeof want, "%02X", fmt & 0x9F);
++        char wl[16]; snprintf(wl, sizeof wl, "%02X", fmt & 0xFF);
++        if (strstr(td, want) || strstr(td, wl)) {
++          static u32 seen[64]; static int ns = 0; int known = 0;
++          u32 sz = dxt ? blkrow * blkrows : w * h * (bpp ? bpp : 1);
++          u32 key = off ^ (w << 20) ^ h ^ (fmt << 24);
++          for (int k = 0; k < ns; k++) if (seen[k] == key) known = 1;
++          if (!known && ns < 24) { seen[ns++] = key;
++            const char* dir = getenv("RSX_CAP_DIR"); char pn[400];
++            snprintf(pn, sizeof pn, "%s/texraw_%08X_%ux%u_f%02X_p%u.bin", dir ? dir : ".", off, w, h, fmt, pitch_arg);
++            FILE* f = fopen(pn, "wb"); if (f) { fwrite(vm_base + off, 1, sz, f); fclose(f); }
++            fprintf(stderr, "[TEXDUMP] %s sz=%u pitch_arg=%u row_bytes=%u dxt=%d swz=%d%c", pn, sz, pitch_arg, tl.row_bytes, dxt, tl.swizzled, 10);
++            if (dxt && ((fmt & 0x9F) == 0x86 || (fmt & 0x9F) == 0x88)) {
++              int d5 = (fmt & 0x9F) == 0x88; u32 bs = d5 ? 16 : 8;
++              u32 bw = (w + 3) / 4, bh = (h + 3) / 4;
++              u8* rgb = (u8*)calloc((size_t)w * h, 4);
++              for (u32 by = 0; by < bh; by++) for (u32 bx = 0; bx < bw; bx++) {
++                const u8* b = vm_base + off + (u64)by * tl.row_bytes + bx * bs;
++                u8 al[8] = {0}; u8 ai[16] = {0};
++                if (d5) { al[0]=b[0]; al[1]=b[1];
++                  if (al[0] > al[1]) for (int i=1;i<7;i++) al[1+i] = (u8)(((7-i)*al[0] + i*al[1]) / 7);
++                  else { for (int i=1;i<5;i++) al[1+i] = (u8)(((5-i)*al[0] + i*al[1]) / 5); al[6]=0; al[7]=255; }
++                  /* al[0],al[1] are endpoints; rebuild indices 2..7 above wrote into al[2..] */
++                  u64 bits = 0; for (int i=0;i<6;i++) bits |= (u64)b[2+i] << (8*i);
++                  for (int i=0;i<16;i++) ai[i] = (u8)((bits >> (3*i)) & 7); }
++                const u8* cb = b + (d5 ? 8 : 0);
++                u16 c0 = (u16)(cb[0] | cb[1] << 8), c1 = (u16)(cb[2] | cb[3] << 8);
++                u8 col[4][4];
++                u8 r0=(c0>>11)*255/31, g0=((c0>>5)&63)*255/63, b0=(c0&31)*255/31;
++                u8 r1=(c1>>11)*255/31, g1=((c1>>5)&63)*255/63, b1=(c1&31)*255/31;
++                col[0][0]=r0;col[0][1]=g0;col[0][2]=b0;col[0][3]=255;
++                col[1][0]=r1;col[1][1]=g1;col[1][2]=b1;col[1][3]=255;
++                if (c0 > c1 || d5) {
++                  col[2][0]=(2*r0+r1)/3;col[2][1]=(2*g0+g1)/3;col[2][2]=(2*b0+b1)/3;col[2][3]=255;
++                  col[3][0]=(r0+2*r1)/3;col[3][1]=(g0+2*g1)/3;col[3][2]=(b0+2*b1)/3;col[3][3]=255;
++                } else {
++                  col[2][0]=(r0+r1)/2;col[2][1]=(g0+g1)/2;col[2][2]=(b0+b1)/2;col[2][3]=255;
++                  col[3][0]=col[3][1]=col[3][2]=0;col[3][3]=0;
++                }
++                u32 ix = cb[4] | cb[5] << 8 | cb[6] << 16 | (u32)cb[7] << 24;
++                for (int py = 0; py < 4; py++) for (int px = 0; px < 4; px++) {
++                  u32 x = bx * 4 + px, y = by * 4 + py; if (x >= w || y >= h) continue;
++                  int ci = (ix >> (2 * (py * 4 + px))) & 3; u8* o = rgb + ((u64)y * w + x) * 4;
++                  o[0]=col[ci][0]; o[1]=col[ci][1]; o[2]=col[ci][2];
++                  o[3] = d5 ? al[ai[py*4+px]] : col[ci][3];
++                }
++              }
++              for (int pass = 0; pass < 2; pass++) {
++                char bn[400]; snprintf(bn, sizeof bn, "%s/texdec_%08X_%ux%u_f%02X_%s.bmp", dir ? dir : ".", off, w, h, fmt, pass ? "a" : "rgb");
++                FILE* g = fopen(bn, "wb"); if (!g) continue;
++                u32 rowb = w * 3, rowp = (rowb + 3) & ~3u, fsz = 54 + rowp * h;
++                u8 hd[54] = {'B','M'}; hd[2]=(u8)fsz; hd[3]=(u8)(fsz>>8); hd[4]=(u8)(fsz>>16); hd[5]=(u8)(fsz>>24);
++                hd[10]=54; hd[14]=40; hd[18]=(u8)w; hd[19]=(u8)(w>>8); hd[22]=(u8)h; hd[23]=(u8)(h>>8); hd[26]=1; hd[28]=24;
++                fwrite(hd, 1, 54, g);
++                for (int y = (int)h - 1; y >= 0; y--) { for (u32 x = 0; x < w; x++) { const u8* p = rgb + ((u64)y*w + x)*4; u8 px[3];
++                    if (pass) px[0]=px[1]=px[2]=p[3]; else { px[0]=p[2]; px[1]=p[1]; px[2]=p[0]; }
++                    fwrite(px, 1, 3, g); } for (u32 z = rowb; z < rowp; z++) fputc(0, g); }
++                fclose(g);
++              }
++              free(rgb);
++            }
++          }
++        }
++      } }
+ 
+     /* The diagnostics below only apply to the linear 8-bit case (Bink video
+      * planes); they used to sit inside that branch of the conversion. */
+@@ -3426,6 +3518,22 @@ static int vp_upload_tex_slot(u32 off, u32 w, u32 h, u32 fmt, int cube, u32 mips
+                         off, w, h, fmt, 10); }
+         }
+       } }
++    /* ZETA_FILL (default on, ZETA_FILL=0 disables): the guest samples its depth
++     * buffer (zeta offset) as a texture before anything wrote it. An empty
++     * buffer reads depth 0.0 = black; a freshly cleared depth buffer is 1.0.
++     * Fill never-written zeta-offset textures with 0xFF so they read as 1.0. */
++    { static int zf = -1;
++      if (zf < 0) { const char* e = getenv("ZETA_FILL"); zf = e ? atoi(e) : 1; }
++      const rsx_state* _zs = s_d3d.current_rsx_state;
++      if (zf && !dxt && _zs && _zs->surface_zeta_offset && (off & 0x0FFFFFFFu) == _zs->surface_zeta_offset) {
++        u32 nz = 0, sz = w * h * bpp;
++        for (u32 i2 = 0; i2 < sz && i2 < 0x40000u; i2 += 61) if (vm_base[off + i2]) nz++;
++        if (!nz) {
++            for (u32 y = 0; y < h; y++) memset((u8*)mapped + (u64)y * pitch, 0xFF, (size_t)w * bpp);
++            { static int _n = 0; if (PS3_LOG_FIRST(_n, 3))
++                fprintf(stderr, "[ZETAFILL] off=0x%08X %ux%u fmt=0x%02X -> 0xFF%c", off, w, h, fmt, 10); }
++        }
++      } }
+     }   /* end per-face conversion */
+     off = _off0; mapped = _map0;
+     if (up_res != s_d3d.tex_ring) t->up->lpVtbl->Unmap(t->up, 0, NULL);
+@@ -3551,7 +3659,7 @@ static void vp_record_cb(u32 slot, int vs_idx, const D3D12DrawRecord* dr)
+                   fputc(10, stderr); }
+               /* distinct fragment programs seen -- if every draw shares one,
+                * SET_SHADER_PROGRAM is not being tracked per draw. */
+-              if (fk) { static u32 seen[16]; static int ns = 0; int f = 0;
++              if (fk) { static u32 seen[64]; static int ns = 0; int f = 0;
+                   for (int q = 0; q < ns; q++) if (seen[q] == dr->fp_addr) f = 1;
+                   if (!f && ns < 16) { seen[ns++] = dr->fp_addr;
+                       fprintf(stderr, "[FPK] distinct fp #%d = 0x%08X%c", ns, dr->fp_addr, 10); } } }
+@@ -3662,6 +3770,7 @@ static void rec_zeta(D3D12DrawRecord* dr)
+     dr->no_color = st->color_target == 0 && dr->zeta_off != 0;
+ }
+ 
++extern int cellGcmOffsetIsDisplay(u32 offset);
+ /* Which offscreen surface (if any) does the current RSX state render to?
+  * Returns 0 for a display buffer (backbuffer), else the surface's RAW RSX
+  * offset. RTs are keyed by raw offset -- a texture bound at the same raw
+@@ -3961,6 +4070,19 @@ static void off_rt_transition(int slot, D3D12_RESOURCE_STATES to)
+     r->st = to;
+ }
+ 
++/* 1 when any draw of this frame samples the depth surface at `off` as a texture
++ * (GT6 text: glyphs write stencil, a later cover pass reads it back). */
++static int zeta_sampled(u32 off, u32* pw, u32* ph)
++{
++    for (u32 d = 0; d < s_d3d.draw_count && d < MAX_DRAWS; d++) {
++        const D3D12DrawRecord* r = &s_d3d.draws[d];
++        if (!r->is_vp || r->is_clear) continue;
++        for (int u = 0; u < 16; u++)
++            if (r->tex[u].set && r->tex[u].raw == off) { *pw = r->tex[u].w; *ph = r->tex[u].h; return 1; }
++    }
++    return 0;
++}
++
+ static int off_ds_find(u32 off)
+ {
+     if (!off) return -1;
+@@ -4812,6 +4934,10 @@ static void render_frame(void)
+                 off_rt_get(dr->rt_mrt[_m], dr->rt_w, dr->rt_h, dr->rt_fmt);
+         if (dr->is_vp && dr->zeta_off && (dr->rt_off || dr->no_color))
+             off_ds_get(dr->zeta_off, dr->rt_w, dr->rt_h);
++        u32 _zw = 0, _zh = 0;
++        if (0) {}
++        else if (dr->is_vp && !dr->is_clear && dr->zeta_off && !dr->rt_off && zeta_sampled(dr->zeta_off, &_zw, &_zh))
++            off_ds_get(dr->zeta_off, _zw > s_d3d.width ? _zw : s_d3d.width, _zh > s_d3d.height ? _zh : s_d3d.height);   /* display pass whose depth is sampled later */
+         for (int _u = 0; _u < 16; _u++) dr->tex_ds[_u] = -1;   /* set below for draws */
+     }
+     for (u32 _d = 0; _d < s_d3d.draw_count && _d < MAX_DRAWS; _d++) {
+@@ -4901,7 +5027,7 @@ static void render_frame(void)
+           if (sd) for (int _u = 0; _u < 16; _u++)
+               if (dr->tex[_u].set && dr->tex[_u].w == s_d3d.width &&
+                   dr->tex[_u].h == s_d3d.height) {
+-                  static u32 seen[16]; static int ns = 0; int known = 0;
++                  static u32 seen[64]; static int ns = 0; int known = 0;
+                   for (int k = 0; k < ns; k++) if (seen[k] == dr->fp_addr) known = 1;
+                   if (!known && ns < 16) { seen[ns++] = dr->fp_addr;
+                       fprintf(stderr, "[SCREENTEX] unit=%d raw=0x%08X %ux%u fmt=0x%02X"
+@@ -4926,14 +5052,20 @@ static void render_frame(void)
+                 if (crt >= 0) {
+                     dr->tex_rt[_u] = crt;
+                     dr->tex_ds[_u] = ds;
+-                    srv_write(wslot, s_d3d.off_rt[crt].res, (DXGI_FORMAT)s_d3d.off_rt[crt].dxgi,
+-                              D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING);
++                    /* The copy holds real A,R,G,B (A = depth high byte, B =
++                     * stencil), so the guest's crossbar applies as for any
++                     * A8R8G8B8 texture (GT6 text reads it through 0xAAFF). */
++                    { static int dm = -1;
++                      if (dm < 0) { const char* e = getenv("DS_REMAP"); dm = e ? atoi(e) : 1; }
++                      srv_write(wslot, s_d3d.off_rt[crt].res, (DXGI_FORMAT)s_d3d.off_rt[crt].dxgi,
++                                dm ? rsx_remap_to_d3d(dr->tex[_u].ctrl1, 0x85)
++                                   : D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING); }
+                     continue;
+                 }
+             }
+             /* Display-sized sampler source -> the rendered frame. */
+             if (dr->tex[_u].set && s_screen_copy &&
+-                dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height) {
++                ((dr->tex[_u].w == s_d3d.width && dr->tex[_u].h == s_d3d.height) || cellGcmOffsetIsDisplay(dr->tex[_u].raw))) {
+                 static int en = -1;
+                 if (en < 0) { const char* e = getenv("SCREEN_AS_TEX"); en = e ? atoi(e) : 1; }
+                 if (en) {
+@@ -5233,7 +5365,8 @@ static void render_frame(void)
+                 if (!dr->is_vp) continue;
+                 for (int _u = 0; _u < 16; _u++) {
+                     const int ds = dr->tex_ds[_u];
+-                    if (ds < 0 || ds == cur_z || s_d3d.off_ds[ds].conv_gen == s_d3d.off_ds[ds].gen)
++                    if (ds < 0 || (ds == cur_z && (dr->zs_key & (2u | (1u << 5)))) ||
++                        s_d3d.off_ds[ds].conv_gen == s_d3d.off_ds[ds].gen)
+                         continue;
+                     ds_convert(ds, dr->tex_rt[_u]);
+                     s_d3d.cmd_list->lpVtbl->SetGraphicsRootSignature(s_d3d.cmd_list, s_d3d.vp_root_sig);
+@@ -5272,7 +5405,7 @@ static void render_frame(void)
+                     wantm[_m] = (dr->rt_mrt[_m] && !dr->no_color) ? off_rt_find(dr->rt_mrt[_m]) : -1;
+                 /* The draw's own depth surface, or the shared buffer for a pass
+                  * without one (and for display targets, as before). */
+-                const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color))
++                const int wantz = (dr->zeta_off && (want >= 0 || dr->no_color || !dr->rt_off))
+                                 ? off_ds_find(dr->zeta_off) : -1;
+                 if (want != cur_rt || wantm[0] != cur_m[0] ||
+                     wantm[1] != cur_m[1] || wantm[2] != cur_m[2] ||
+@@ -6446,6 +6579,20 @@ static void read_vp_vertex(const rsx_state* state, u32 vi, VPSlot* out16)
+             rsx_vtx_pos_dbg(state, out16[0].v, n);
+         }
+     }
++    { static int _c = -1, _cn = 0; if (_c < 0) _c = getenv("VTX_COL") ? 1 : 0; if (_c && vi == 0 && _cn < 400) { _cn++; fprintf(stderr, "[VTXCOL] fp=0x%X a3en=%d d4f=(%g,%g,%g,%g) out=(%g,%g,%g,%g)\n", state->shader_program, state->vertex_attribs[3].enabled, state->vertex_data4f[3][0], state->vertex_data4f[3][1], state->vertex_data4f[3][2], state->vertex_data4f[3][3], out16[3].v[0], out16[3].v[1], out16[3].v[2], out16[3].v[3]); } }
++    { static int _n2 = 0; if (getenv("VTX_A3RAW") && _n2 < 12 && state->vertex_attribs[3].enabled && state->shader_program == 0x4E526C1) { _n2++;
++        extern uint8_t* vm_base; extern u32 cellGcmResolveLocated(int, u32);
++        const rsx_vertex_attrib* a0 = &state->vertex_attribs[3];
++        u32 ao = (a0->offset & 0x7FFFFFFFu) + vi * a0->stride;
++        const u8* q = vm_base + ((a0->offset & 0x80000000u) ? cellGcmResolveLocated(0, ao) : cellGcmResolveLocated(1, ao));
++        fprintf(stderr, "[A3RAW] vi=%u fp=0x%X a0off=0x%X a3off=0x%X stride=%u:", vi, state->shader_program, a0->offset, state->vertex_attribs[3].offset, a0->stride);
++        for (int b = 0; b < 24; b++) fprintf(stderr, " %02X", q[b]); fprintf(stderr, "\n"); } }
++    { static int _on = -1, _n = 0; if (_on < 0) _on = getenv("VTX_A3") ? 1 : 0;
++      if (_on && _n < 400 && state->vertex_attribs[3].enabled && (state->shader_program == 0x4E739C1)) { _n++;
++        fprintf(stderr, "[VTXA3] fp=0x%X vi=%u a0=(%g,%g,%g,%g) a3=(%g,%g,%g,%g) a8=(%g,%g) a3t=%u/%u\n", state->shader_program, vi,
++                out16[0].v[0],out16[0].v[1],out16[0].v[2],out16[0].v[3],
++                out16[3].v[0],out16[3].v[1],out16[3].v[2],out16[3].v[3], out16[8].v[0],out16[8].v[1],
++                state->vertex_attribs[3].type, state->vertex_attribs[3].size); } }
+ }
+ 
+ /* Per-draw vertex cache for the paths that expand one guest vertex into
+@@ -6522,9 +6669,9 @@ static void vp_attrs_dbg(const rsx_state* state)
+      * register instead -- which is exactly the case worth seeing. */
+     { u32 mask = 0;
+       for (int i = 0; i < 16; i++) if (state->vertex_attribs[i].enabled) mask |= 1u << i;
+-      static u32 seen[16]; static int ns = 0;
++      static u32 seen[64]; static int ns = 0;
+       for (int i = 0; i < ns; i++) if (seen[i] == mask) return;
+-      if (ns >= 16) return;
++      if (ns >= 64) return;
+       seen[ns++] = mask; }
+     fprintf(stderr, "[VPATTR] --- fp=0x%X ---%c", state->shader_program, 10);
+     fprintf(stderr, "[VPATTR] divider_op=0x%08X\n", state->frequency_divider_op);
+@@ -7115,7 +7262,7 @@ static u32 upload_tris_vp_indexed(const rsx_state* state, u32 first, u32 count)
+       if (cap < 0) { const char* e = getenv("IDX_DBG"); cap = e ? atoi(e) : 0; }
+       if (cap && n < cap && count >= 3) { n++;
+         extern u32 cellGcmResolveOffset(u32);
+-        const rsx_vertex_attrib* a0 = &state->vertex_attribs[0];
++        const rsx_vertex_attrib* a0 = &state->vertex_attribs[3];
+         u32 vbase = cellGcmResolveOffset(a0->offset & 0x7FFFFFFFu);
+         u32 nz = 0; for (u32 q = 0; q < 0x1000u; q += 29) if (vm_base[vbase + q]) nz++;
+         fprintf(stderr, "[IDX] idxoff=0x%X idx: %u %u %u | a0 off=0x%08X(->0x%08X nz=%u/142)"
+@@ -7193,6 +7340,9 @@ static u32 upload_quad_strip_vp_indexed(const rsx_state* state, u32 first, u32 c
+ 
+ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    /* POLYGON is a convex fan; the VP path only knows FAN. GT6 draws its
++     * full-screen quads as POLYGON, and the legacy path emits no pixels. */
++    if (primitive == RSX_PRIMITIVE_POLYGON) primitive = RSX_PRIMITIVE_TRIANGLE_FAN;
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+@@ -7457,6 +7607,9 @@ static void d3d12_draw_arrays(void* ud, u32 primitive, u32 first, u32 count)
+ 
+ static void d3d12_draw_indexed(void* ud, u32 primitive, u32 first, u32 count)
+ {
++    /* POLYGON is a convex fan; the VP path only knows FAN. GT6 draws its
++     * full-screen quads as POLYGON, and the legacy path emits no pixels. */
++    if (primitive == RSX_PRIMITIVE_POLYGON) primitive = RSX_PRIMITIVE_TRIANGLE_FAN;
+     /* RSX_LIVE_FEED_DBG=1: pair with the [feed] method counts so "the FIFO
+      * carries no draw batches" can be checked against "the backend is told
+      * to draw" in the same run. */
+diff --git a/runtime/ppu/ppu_fs.cpp b/runtime/ppu/ppu_fs.cpp
+index 37e37454..4d77c2c1 100644
+--- a/runtime/ppu/ppu_fs.cpp
++++ b/runtime/ppu/ppu_fs.cpp
+@@ -57,6 +57,7 @@ extern "C" void ydkj_host_bt(const char* tag);
+ #  define FS_TELL64(f)       ((int64_t)_ftelli64(f))
+ typedef struct _stat64 fs_stat64_t;
+ /* _stat64 rejects a trailing slash (MinGW's stat wrapper stripped it). */
++extern "C" void ppu_rwatch_arm(uint32_t lo, uint32_t len);
+ static int FS_STAT64(const char* p, fs_stat64_t* s)
+ {
+     char t[1100]; size_t n = strlen(p);
+@@ -480,6 +481,7 @@ static inline void fs_prefault(uint32_t buf, uint64_t len)
+     p[len - 1] = p[len - 1];
+ }
+ 
++extern "C" void ppu_dump_guest_stack(ppu_context*, const char*);
+ static void cellFsRead(ppu_context* ctx)
+ {
+     int fd          = (int)(uint32_t)ctx->gpr[3];
+@@ -515,8 +517,10 @@ static void cellFsRead(ppu_context* ctx)
+     { static int wfd = -2;
+       if (wfd == -2) { const char* e = ps3_env_once("PS3_FSLOG_READS"); wfd = e ? atoi(e) : -1; }
+       if (wfd >= 0 && fd == wfd)
+-          fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld\n",
+-                  fd, (unsigned long long)nbytes, n, fpos_before); }
++          fprintf(stderr, "[fsread] fd=%d want=%llu got=%zu pos=%ld buf=0x%08X\n",
++                  fd, (unsigned long long)nbytes, n, fpos_before, buf);
++      if (wfd>=0 && fd==wfd && ps3_env_once("PS3_FSLOG_READS_BT")) ppu_dump_guest_stack(ctx, "fsread"); }
++    { static int _ra=-1; if(_ra<0) _ra=getenv("PS3_RWATCH_AFTER_512")?1:0; if (nbytes==512 && _ra && fd==8) ppu_rwatch_arm(buf,512); }
+     if (ps3_env_once("PS3_FSLOG")) { static int _fd=0; if(PS3_LOG_FIRST(_fd, 20)) fprintf(stderr,"[FSDBG] fd=%d raw_nbytes=0x%llX clamped=0x%llX buf=0x%08X fpos_before=%ld n=%zu eof=%d err=%d\n", fd,(unsigned long long)raw_nbytes,(unsigned long long)nbytes,buf,fpos_before,n,feof(f),ferror(f)); }
+ #ifdef _WIN32
+     if (ps3_env_once("PS3_FSLOG") && buf==0 && raw_nbytes>0x10000) { static int _b=0; if(_b++<2){ void* fr[30]; unsigned short nn=RtlCaptureStackBackTrace(0,30,fr,0); uintptr_t mb=(uintptr_t)GetModuleHandleA(0); fprintf(stderr,"[FSBT] null-buf read caller rvas:"); for(unsigned short i=0;i<nn&&i<16;i++) fprintf(stderr," %llX",(unsigned long long)((uintptr_t)fr[i]-mb)); fprintf(stderr,"\n"); } }
+@@ -562,7 +566,10 @@ static void cellFsWrite(ppu_context* ctx)
+     if (!f) { ctx->gpr[3] = (uint64_t)(int64_t)CELL_FS_EBADF; return; }
+     fs_prefault(buf, nbytes);   /* kernel READS the buffer; same reserved-page trap */
+     fs_set_dir(fd, f, 2);
++    long wpos_before = ftell(f);
+     size_t n = fwrite(vm_base + buf, 1, (size_t)nbytes, f);
++    { static int wfd=-2; if (wfd==-2){ const char* e=ps3_env_once("PS3_FSLOG_WRITES"); wfd=e?atoi(e):-1; }
++      if (wfd==fd) fprintf(stderr,"[fswrite] fd=%d want=%llu got=%zu pos=%ld b0=%02X%02X%02X%02X\n",fd,(unsigned long long)nbytes,n,wpos_before,vm_base[buf],vm_base[buf+1],vm_base[buf+2],vm_base[buf+3]); }
+     /* DIAGNOSTIC (PS3_FSLOG_BT=1): dump the guest back-chain when the game logs the
+      * render-config failure, to locate setScreenRenderTargetInternal & the config obj. */
+     if (ps3_env_once("PS3_FSLOG_BT") && buf && nbytes > 0 && nbytes < 4096 && vm_base) {
+diff --git a/runtime/ppu/ppu_hle.cpp b/runtime/ppu/ppu_hle.cpp
+index 5148b384..6cb2f354 100644
+--- a/runtime/ppu/ppu_hle.cpp
++++ b/runtime/ppu/ppu_hle.cpp
+@@ -374,6 +374,15 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+                 nid, (uint32_t)ctx->gpr[3], (uint32_t)ctx->gpr[4],
+                 (uint32_t)ctx->gpr[5], (uint32_t)ctx->lr);
+     }
++    /* PS3_HLE_STACK=<nid-hex>: guest stack dump at the first 3 calls of one import
++     * (who calls it, from which thread). NID = sha1(name + key) low 32 bit LE. */
++    { static long s_hs = -1; extern void ppu_dump_guest_stack(ppu_context*, const char*);
++      if (s_hs < 0) { const char* e = getenv("PS3_HLE_STACK"); s_hs = e ? (long)strtoul(e, 0, 16) : 0; }
++      if (s_hs && nid == (uint32_t)s_hs) {
++        static int _ns = 0;
++        if (_ns < 3) { _ns++; fprintf(stderr, "[hle-stack] nid=0x%08X tid=%u r3=0x%08X lr=0x%08X\n", nid,
++                                      (unsigned)ctx->thread_id, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr);
++                       ppu_dump_guest_stack(ctx, "hle"); } } }
+     /* PS3_HLE_ARGS=<nid-hex>: dump the full PPC64 argument register set (r3-r10)
+      * for one import. PS3_HLE_TRACE only shows r3-r5, which is not enough to tell
+      * a MISDECLARED HLE prototype from a guest passing bad values -- the two look
+@@ -405,7 +414,7 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+          * 0 under the DRAIN/fragment model, so scan instead of walk.) */
+         { uint32_t prev=0; int found=0; char b[1600]; int p=snprintf(b,sizeof b,"[exit-chain] codeptrs:");
+           for(uint32_t a=sp; a<sp+0x3000 && a<0x0FF00000u && found<60; a+=4){ uint32_t v=vm_read32(a);
+-            if(((v>=0x00010000u&&v<0x00900000u)||(v>=0x30000000u&&v<0x30100000u)) && v!=0x008969A8u){
++            if(((v>=0x00010000u&&v<0x00F908C4u)||(v>=0x30000000u&&v<0x30100000u)) && v!=0x008969A8u){
+               if(v!=prev){ p+=snprintf(b+p,sizeof(b)-p," %08X",v); prev=v; found++; } } }
+           fprintf(stderr,"%s\n",b); }
+ #ifdef _WIN32
+@@ -745,6 +754,10 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+             { unsigned t = (unsigned)ctx->thread_id;
+               if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = g_ctx[i].name; }
+             g_ctx[i].fn(ctx);
++            { static int en_ = -1; if (en_ < 0) en_ = getenv("PS3_HLE_ERRLOG") ? 1 : 0;
++              uint32_t rv_ = (uint32_t)ctx->gpr[3];
++              if (en_ && ((rv_ & 0xFFFF0000u) == 0x80010000u || (rv_ & 0xFFFF0000u) == 0x80020000u || (rv_>>24)==0x80 && (rv_ & 0xFFFF0000u)!=0x80010000u) && g_ctx[i].name && strcmp(g_ctx[i].name, "cellFsStat")) {
++                static int n_; if (PS3_LOG_FIRST(n_, 200)) fprintf(stderr, "[hle-err] %s -> 0x%08X lr=0x%08X\n", g_ctx[i].name, rv_, (uint32_t)ctx->lr); } }
+             { unsigned t = (unsigned)ctx->thread_id;
+               if (t < PS3_HLE_INFLIGHT_MAX) g_hle_inflight[t] = nullptr; }
+             return;
+@@ -838,6 +851,10 @@ extern "C" void ps3_hle_call(uint32_t nid, ppu_context* ctx)
+     uint64_t r = fn(ctx->gpr[3], ctx->gpr[4], ctx->gpr[5], ctx->gpr[6],
+                     ctx->gpr[7], ctx->gpr[8], ctx->gpr[9], ctx->gpr[10]);
+     ctx->gpr[3] = r;   /* PPC return value */
++    { static int en2_ = -1; if (en2_ < 0) en2_ = getenv("PS3_HLE_ERRLOG") ? 1 : 0;
++      uint32_t rv2_ = (uint32_t)r;
++      if (en2_ && (rv2_ >> 24) == 0x80 && e->name) {
++        static int n2_; if (PS3_LOG_FIRST(n2_, 300)) fprintf(stderr, "[hle-err] %s -> 0x%08X lr=0x%08X\n", e->name, rv2_, (uint32_t)ctx->lr); } }
+     /* PS3_HLE_PTRCHECK: the guest stores HLE return values as guest pointers, so
+      * an HLE returning a value outside guest RAM (>= 0x10000000) that is not a
+      * CELL_ERROR code (0x8001xxxx / 0x8002xxxx) is leaking a truncated HOST
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index ea7de18a..1af3ae74 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -998,7 +998,7 @@ extern "C" void ppu_resv_break_line(uint32_t ea)
+ static inline volatile LONG* resv_slot(uint64_t ea) { return &g_resv_locks[((uint32_t)ea >> 4) & (PPU_RESV_LOCKS - 1)]; }
+ static inline void resv_lock(volatile LONG* L)   { while (_InterlockedExchange(L, 1)) { while (*L) YieldProcessor(); } }
+ static inline void resv_unlock(volatile LONG* L) { _InterlockedExchange(L, 0); }
+-static inline void ppu_resv_break(uint64_t addr)   /* MUST hold g_resv_lock */
++extern "C" void ppu_resv_break(uint64_t addr)   /* MUST hold g_resv_lock */
+ {
+     uint64_t a = (uint32_t)addr;   /* match the inline guard: reserve_addr holds (uint32_t)ea */
+     long n = g_resv_ctx_n; if (n > PPU_RESV_MAX) n = PPU_RESV_MAX;
+@@ -1380,6 +1380,13 @@ static int vm_oob_report(uint32_t a, uint32_t n)
+  * compare; POSIX keeps the real range check. */
+ static inline int vm_oob(uint32_t a, uint32_t n)
+ {
++    /* A 32-bit guest access must stay inside the 4 GB guest arena. The old
++     * fast path skipped this on Windows because the whole space is reserved,
++     * but the last page is not committed: a read at 0xFFFFFFFF (the guest's
++     * "invalid pointer" sentinel) or any access that wraps past 4 GB faults in
++     * the host. Treat the wrap as OOB and return the runtime's zero fill. */
++    if (__builtin_expect(a > 0xFFFFFFFFu - (n - 1), 0))
++        return vm_oob_report(a, n);
+     if (__builtin_expect(ppu_vm_size == 0, 1)) return 0;
+     if (__builtin_expect((uint64_t)a + n <= ppu_vm_size, 1)) return 0;
+     return vm_oob_report(a, n);
+@@ -1591,15 +1598,19 @@ extern "C" {
+ /* -2 until PPU_RWATCH is read, -1 when unset. File scope so the gate below is
+  * one load inlined into every vm_read*, not a call. */
+ static int64_t s_rwatch_lo = -2;
++static uint32_t s_rwatch_len = 0x10; static unsigned long s_rwatch_n;
++extern "C" int g_rwatch_vec_on = 0;
++extern "C" void ppu_rwatch_arm(uint32_t lo, uint32_t len) { s_rwatch_n = 0; s_rwatch_len = len; s_rwatch_lo = (int64_t)lo; g_rwatch_vec_on = 1; }
+ static __attribute__((noinline)) void ppu_rwatch_hit_slow(uint32_t a, int width, void* ra);
+ static inline void ppu_rwatch_hit(uint32_t a, int width, void* ra)
+ {
+     if (__builtin_expect(s_rwatch_lo == -1, 1)) return;
+     ppu_rwatch_hit_slow(a, width, ra);
+ }
++extern "C" void ppu_rwatch_vec(uint64_t ea) { if (s_rwatch_lo >= 0) for (int o=0;o<16;o+=4) ppu_rwatch_hit((uint32_t)(ea & ~0xFULL)+o, 4, __builtin_return_address(0)); }
+ static __attribute__((noinline)) void ppu_rwatch_hit_slow(uint32_t a, int width, void* ra)
+ {
+-    int64_t& s_lo = s_rwatch_lo; static uint32_t s_len = 0x10;
++    int64_t& s_lo = s_rwatch_lo; uint32_t& s_len = s_rwatch_len;
+     if (s_lo == -2) {
+         const char* e = getenv("PPU_RWATCH");
+         s_lo = e ? (int64_t)strtoul(e, 0, 16) : -1;
+@@ -1609,8 +1620,8 @@ static __attribute__((noinline)) void ppu_rwatch_hit_slow(uint32_t a, int width,
+     }
+     if (s_lo < 0) return;
+     if (a < (uint32_t)s_lo || a >= (uint32_t)s_lo + s_len) return;
+-    static unsigned long rn;
+-    if (++rn <= 24 || (rn % 4096) == 0) {
++    unsigned long& rn = s_rwatch_n;
++    if (++rn <= 600 || (rn % 4096) == 0) {
+         /* ...and the VALUE. PPU_WWATCH has always printed what was written;
+          * the read side printed only the address, so answering "what did it
+          * actually get" meant a second run with a write watch, or a guess --
+@@ -1849,7 +1860,7 @@ uint32_t vm_read32(uint64_t a) { if (vm_oob((uint32_t)a,4)) return 0; ppu_rwatch
+       } }
+       else { last=(uint32_t)a; n=0; } }
+     return __builtin_bswap32(v); }
+-uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap((uint32_t)a,8);
++uint64_t vm_read64(uint64_t a) { if (vm_oob((uint32_t)a,8)) return 0; vm_hotmap((uint32_t)a,8); ppu_rwatch_hit((uint32_t)a, 4, __builtin_return_address(0));
+     if ((uint32_t)a < 0x10000u) ppu_null_read_report((uint32_t)a, 8, __builtin_return_address(0)); uint64_t v; memcpy(&v, vm_base + (uint32_t)a, 8);
+ #ifdef VM_SAMPLE_READS
+     { static uint64_t c=0; if ((++c % 2000000ull)==0) fprintf(stderr, "[sample] read64 0x%08X\n", (uint32_t)a); }
+@@ -1913,6 +1924,8 @@ static void ww_arm_inline_window(uint32_t ww)
+ /* -1 until read; 0 when neither PPU_WVAL nor PPU_WWATCH is set, which with no
+  * sync-line probe armed leaves every guest store one load and one compare. */
+ static int s_store_watch = -1;
++static uint32_t s_ww_g = 0xFFFFFFFFu;
++extern "C" void ppu_wwatch_arm(uint32_t ea) { s_ww_g = ea; ww_arm_inline_window(ea); s_store_watch = 1; }
+ static __attribute__((noinline)) void barrier_watch_hit_slow(uint32_t a, uint32_t v, int width, void* ra);
+ static inline void barrier_watch_hit(uint32_t a, uint32_t v, int width, void* ra)
+ {
+@@ -1961,7 +1974,7 @@ static __attribute__((noinline)) void barrier_watch_hit_slow(uint32_t a, uint32_
+     /* PPU_WWATCH=<hexEA>: log every PPU store into the 16-byte line at that EA,
+      * with the writing guest function -- to find who fills (or fails to fill)
+      * a struct field (e.g. FMOD's overlay descriptor source at 0x94F680). */
+-    { static uint32_t s_ww = 0xFFFFFFFFu;
++    { uint32_t& s_ww = s_ww_g;
+       if (s_ww == 0xFFFFFFFFu) { const char* e = getenv("PPU_WWATCH");
+                                  /* base 16, not 0: the variable is documented as <hexEA>
+                                   * and everyone writes it bare. Under base 0 "10708A14"
+@@ -2587,7 +2600,7 @@ static void icall_hist(ppu_context* ctx, uint32_t tgt, int phase)
+     const uint32_t t = (uint32_t)ctx->thread_id, z = (uint32_t)ctx->gpr[3] == 0;
+     /* PS3_ICALL_TRACE=<tid>: also log every call on that guest thread, in order. */
+     { static int tt = -2; if (tt == -2) { const char* e = getenv("PS3_ICALL_TRACE"); tt = e ? atoi(e) : -1; }
+-      if (tt >= 0 && (uint32_t)tt == t) fprintf(stderr, "[ict] %08X %u\n", tgt, (uint32_t)ctx->gpr[3]); }
++      if (tt >= 0 && (uint32_t)tt == t) fprintf(stderr, "[ict] %08X %u lr=%08X\n", tgt, (uint32_t)ctx->gpr[3], (uint32_t)ctx->lr); }
+     AcquireSRWLockExclusive(&lk);
+     for (uint32_t i = (tgt * 2654435761u + t) % N, n = 0; n < N; n++, i = (i + 1) % N) {
+         if (key[i] == tgt && tid[i] == t) { cnt[i]++; zero[i] += z; break; }
+@@ -2716,6 +2729,16 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+         fprintf(stderr,"[CALL]    r28=0x%08X r29=0x%08X r30=0x%08X r31=0x%08X\n",
+                 (uint32_t)ctx->gpr[28],(uint32_t)ctx->gpr[29],
+                 (uint32_t)ctx->gpr[30],(uint32_t)ctx->gpr[31]); } }
++      /* PS3_CALLTRACE_ARM=<signed offset>: with PS3_CALLTRACE_TO, arm the write
++       * watch on r3+offset at the first matching call (object addresses vary per
++       * run, so a fixed PPU_WWATCH misses them). */
++      { static int ar = -2; static int32_t aoff = 0; static uint32_t ato = 0;
++        if (ar == -2) { const char* e = getenv("PS3_CALLTRACE_ARM"); const char* t = getenv("PS3_CALLTRACE_TO");
++                        ar = (e && t) ? 1 : 0; if (ar) { aoff = (int32_t)strtol(e,0,0); ato = (uint32_t)strtoul(t,0,16); } }
++        if (ar == 1 && addr == ato) {
++            ar = 0; uint32_t ea = (uint32_t)ctx->gpr[getenv("PS3_CALLTRACE_ARM_R4") ? 4 : 3] + (uint32_t)aoff;
++            fprintf(stderr, "[arm] wwatch r3=0x%08X -> 0x%08X\n", (uint32_t)ctx->gpr[3], ea);
++            ppu_wwatch_arm(ea); } }
+       /* FLOW_FORCE_RTCFG=1: flOw calls PCoreGcmRenderInterface::
+        * setScreenRenderTarget(this, config) exactly once, with config = NULL,
+        * and every later setScreenRenderTargetInternal() then reports "No
+@@ -3097,14 +3120,28 @@ static void ps3_indirect_call_impl(ppu_context* ctx)
+          * see where each link points (heap object vs game image vs garbage) and
+          * pinpoint how the garbage code field (e.g. 0xC708C708) got there. */
+         if (vm_base) {
++            /* Diagnostics must never be able to kill the process. The unresolved
++             * call's r3 is arbitrary guest-controlled data -- GT6 leaves it at
++             * 0xFFFFFFFF -- and the old unbounded g32() read four bytes there,
++             * which crosses the last byte of the 4 GB guest window and faults at
++             * vm_base + 0x100000000. That reporter fault looked like a PPU crash
++             * and hid the real bad-handler event. Check the whole access, not
++             * just the start address. */
+             auto g32 = [](uint32_t ea)->uint32_t {
++                const uint64_t end = (uint64_t)ea + 4u;
++                if (ea < 0x10000u || end > 0x100000000ull) return 0;
++                if (ppu_vm_size && end > ppu_vm_size) return 0;
+                 return __builtin_bswap32(*(volatile uint32_t*)(vm_base + ea));
+             };
+             uint32_t obj = (uint32_t)ctx->gpr[3];
+             uint32_t vt  = g32(obj);
+             uint32_t opd = g32(vt);
+-            fprintf(stderr, "      CHAIN obj=%08X  *(obj)=vtable=%08X  *(vtable)[0]=opd=%08X  *(opd)=code=%08X  *(opd+4)=toc=%08X\n",
+-                    obj, vt, opd, g32(opd), g32(opd + 4));
++            const int obj_ok = obj >= 0x10000u &&
++                (uint64_t)obj + 0x20u <= 0x100000000ull &&
++                (!ppu_vm_size || (uint64_t)obj + 0x20u <= ppu_vm_size);
++            fprintf(stderr, "      CHAIN obj=%08X  *(obj)=vtable=%08X  *(vtable)[0]=opd=%08X  *(opd)=code=%08X  *(opd+4)=toc=%08X%s\n",
++                    obj, vt, opd, g32(opd), g32(opd + 4),
++                    obj_ok ? "" : "  (obj not a guest object -- chain skipped)");
+             fprintf(stderr, "      obj[0..7]: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+                     g32(obj+0),g32(obj+4),g32(obj+8),g32(obj+12),g32(obj+16),g32(obj+20),g32(obj+24),g32(obj+28));
+             fprintf(stderr, "      vtable[0..7]: %08X %08X %08X %08X %08X %08X %08X %08X\n",
+@@ -3248,6 +3285,17 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+           const char* e = getenv("PPU_GUARD_EA");
+           if (e && *e) ppu_guard_page((uint32_t)strtoul(e, 0, 16)); } }
+     uint64_t num = ctx->gpr[11];
++    /* PS3_SC_COUNT=1: count syscalls per (number, tid) and dump the table every
++     * 2^16 calls; compare against RPCS3.log (sys_timer / sys_event / ...). */
++    { static int sc_on = -1; static uint32_t sc_cnt[1024][64]; static uint64_t sc_tot = 0;
++      if (sc_on < 0) sc_on = getenv("PS3_SC_COUNT") ? 1 : 0;
++      if (sc_on) {
++          uint32_t n = (uint32_t)num & 1023, t = (uint32_t)ctx->thread_id & 63;
++          __atomic_fetch_add(&sc_cnt[n][t], 1, __ATOMIC_RELAXED);
++          if ((__atomic_add_fetch(&sc_tot, 1, __ATOMIC_RELAXED) & 0x3FFF) == 0) {
++              for (uint32_t a = 0; a < 1024; a++) for (uint32_t b = 0; b < 64; b++)
++                  if (sc_cnt[a][b]) fprintf(stderr, "[sc] num=%u tid=%u n=%u\n", a, b, sc_cnt[a][b]);
++              fprintf(stderr, "[sc] ----\n"); } } }
+     /* Deliver pending GCM vblank/flip/user callbacks at the timer sleeps too,
+      * not only at HLE imports (ppu_hle.cpp): on hardware they fire
+      * asynchronously, and a guest thread that polls with usleep alone would
+@@ -3303,12 +3351,12 @@ extern "C" void lv2_syscall(ppu_context* ctx)
+                 bg,(unsigned long long)(tgt-bh),(uint32_t)ctx->gpr[5],(uint32_t)ctx->gpr[7],(uint32_t)ctx->lr); } }
+     /* Trace the port_send(port=1) sender (the cri kick): who sends it + the data
+      * (data=0 seen -> is the decode-job payload null? a real uninit field?). */
+-    if (num==138 && (uint32_t)ctx->gpr[3]==1) { static int _s=0; if(PS3_LOG_FIRST(_s, 4)){
++    if (num==138) { static int _s=0; if(PS3_LOG_FIRST(_s, 400)){
+         void* ra=__builtin_return_address(0); char* mb=(char*)GetModuleHandleA(0);
+         uintptr_t tgt=(uintptr_t)ra; uint32_t bg=0; uintptr_t bh=0;
+         for(uint64_t k=0;k<function_table_count;k++){ uintptr_t h=(uintptr_t)function_table[k].func; if(h<=tgt&&h>bh){bh=h;bg=function_table[k].addr;} }
+-        fprintf(stderr,"[sc-caller] port_send(port=1) from func_%08X+0x%llX data=0x%08X/0x%08X/0x%08X\n",
+-                bg,(unsigned long long)(tgt-bh),(uint32_t)ctx->gpr[4],(uint32_t)ctx->gpr[5],(uint32_t)ctx->gpr[6]); } }
++        fprintf(stderr,"[sc-caller] port_send(port=%u) from func_%08X+0x%llX data=0x%08X/0x%08X/0x%08X\n",
++                (uint32_t)ctx->gpr[3],bg,(unsigned long long)(tgt-bh),(uint32_t)ctx->gpr[4],(uint32_t)ctx->gpr[5],(uint32_t)ctx->gpr[6]); } }
+     switch (num) {
+     case 352: {   /* sys_memory_get_user_memory_size(sys_memory_info_t* info)
+                    * info = { u32 total_user_memory; u32 available_user_memory } */
+diff --git a/runtime/ppu/ppu_sysprx.cpp b/runtime/ppu/ppu_sysprx.cpp
+index fd2c2078..f3f1d025 100644
+--- a/runtime/ppu/ppu_sysprx.cpp
++++ b/runtime/ppu/ppu_sysprx.cpp
+@@ -30,6 +30,12 @@ extern "C" uint64_t host_monotonic_ns(void);
+ extern "C" uint8_t* vm_base;
+ extern "C" void ps3_hle_register_ctx(uint32_t nid, const char* name, void (*fn)(ppu_context*));
+ extern "C" void ps3_hle_register_fast(uint32_t nid, int (*fn)(ppu_context*));
++/* libs/spurs/cellSpurs.c: CellSpurs2 initialiser. Declared here rather than
++ * pulling the whole spurs header into the sysPrx set. */
++struct CellSpurs;
++struct CellSpursAttribute;
++extern "C" int32_t cellSpursInitializeWithAttribute2(CellSpurs* spurs,
++                                                     const CellSpursAttribute* attr);
+ extern "C" uint32_t vm_read32(uint64_t a);
+ extern "C" uint64_t vm_read64(uint64_t a);
+ extern "C" void     vm_write32(uint64_t a, uint32_t v);
+@@ -115,6 +121,19 @@ static void sys_process_is_stack(ppu_context* ctx)
+  * unregistered context (bug); stamp a sentinel that matches no real thread. */
+ #define LWM_SELF(ctx) ((uint32_t)(ctx)->thread_id ? (uint32_t)(ctx)->thread_id : 0x7FFFFFFEu)
+ 
++/* A lwmutex must live wholly inside the guest window. The SPURS event crash
++ * was reported as sys_lwmutex_lock only because that was the thread's last HLE
++ * (the real fault was the indirect-call reporter), but a corrupted id must
++ * still not become a host read. Check the full 24-byte structure, not just the
++ * first word. */
++static int lwm_addr_ok(uint32_t a)
++{
++    const uint64_t end = (uint64_t)a + 0x18u;
++    if (a < 0x10000u || end > 0x100000000ull) return 0;
++    if (ppu_vm_size && end > ppu_vm_size) return 0;
++    return 1;
++}
++
+ struct LwmSlot;
+ static struct LwmSlot* lwm_slot(uint32_t addr);   /* fwd (defined below) */
+ static void lwm_release(struct LwmSlot* sl);
+@@ -259,6 +278,13 @@ static void sys_lwmutex_lock(ppu_context* ctx)
+ {
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+     uint32_t self = LWM_SELF(ctx);
++    if (!lwm_addr_ok(lwm)) {
++        { static int _n = 0; if (PS3_LOG_FIRST(_n, 8))
++            fprintf(stderr, "[LWM] lock: non-guest lwm=0x%08X tid=%llu -- ESRCH\n",
++                    lwm, (unsigned long long)ctx->thread_id); }
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010005u;  /* CELL_ESRCH */
++        return;
++    }
+     /* lv2 ABI: r4 = timeout in microseconds, 0 = infinite. The real kernel
+      * returns ETIMEDOUT (0x8001000B) when the wait expires; games rely on that
+      * (e.g. LBP's resource loader locks with a 2s timeout in a retry loop so a
+@@ -310,6 +336,7 @@ static void sys_lwmutex_lock(ppu_context* ctx)
+ static int sys_lwmutex_lock_fast(ppu_context* ctx)
+ {
+     const uint32_t lwm = (uint32_t)ctx->gpr[3];
++    if (!lwm_addr_ok(lwm)) return 0;   /* full handler logs + returns ESRCH */
+     struct LwmSlot* sl = lwm_slot(lwm);
+     if (!sl || lwm_trace()) return 0;
+     const uint32_t self = LWM_SELF(ctx);
+@@ -334,6 +361,10 @@ static void sys_lwmutex_trylock(ppu_context* ctx)
+ {
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
+     uint32_t self = LWM_SELF(ctx);
++    if (!lwm_addr_ok(lwm)) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010005u;  /* CELL_ESRCH */
++        return;
++    }
+     struct LwmSlot* sl0 = lwm_slot(lwm);
+     if (sl0) {
+         if (vm_read32(lwm + LWM_OWNER) == self && vm_read32(lwm + LWM_RECUR) > 0) {
+@@ -354,6 +385,10 @@ static void sys_lwmutex_trylock(ppu_context* ctx)
+ static void sys_lwmutex_unlock(ppu_context* ctx)
+ {
+     uint32_t lwm = (uint32_t)ctx->gpr[3];
++    if (!lwm_addr_ok(lwm)) {
++        ctx->gpr[3] = (uint64_t)(int64_t)(int32_t)0x80010005u;  /* CELL_ESRCH */
++        return;
++    }
+     uint32_t rc = vm_read32(lwm + LWM_RECUR);
+     if (rc > 1) {                       /* recursive hold: count down, keep the lock */
+         vm_write32(lwm + LWM_RECUR, rc - 1);
+@@ -414,32 +449,122 @@ static void sys_lwcond_create(ppu_context* ctx)
+     vm_write32(lwcond + 0x04, ++s_lwcond_id);
+     ctx->gpr[3] = 0;
+ }
+-static void sys_lwcond_destroy(ppu_context* ctx)    { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal(ppu_context* ctx)     { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_all(ppu_context* ctx) { ctx->gpr[3] = 0; }
+-static void sys_lwcond_signal_to(ppu_context* ctx)  { ctx->gpr[3] = 0; }
+-/* Now that the lwmutex is REAL, a no-op wait that keeps holding it deadlocks the
+- * signaler. Release the paired lwmutex, wait briefly, reacquire (poll-style: the
+- * guest's while(!predicate) loop re-checks; signalers stay no-ops). Handles the
+- * common single (non-recursive) hold. */
++/* Real lwcond: lv2 never wakes a waiter spuriously. A waiter parks on a
++ * per-lwcond semaphore after releasing the paired lwmutex; signal / signal_all
++ * give out one / all tickets for threads waiting right now (a signal with
++ * nobody waiting is lost, as on lv2). PS3_LWCOND_POLL=1 restores the old
++ * 1 ms poll with no-op signals. signal_to (r4 = thread id) wakes any one
++ * waiter, who is waiting is not tracked. */
++struct LwcSlot { uint32_t addr; HANDLE sem; long waiters; };
++#define LWC_N 16384
++static LwcSlot g_lwc[LWC_N];
++static CRITICAL_SECTION g_lwc_cs;
++static INIT_ONCE g_lwc_once = INIT_ONCE_STATIC_INIT;
++static BOOL CALLBACK lwc_init_cb(PINIT_ONCE, PVOID, PVOID*) { InitializeCriticalSection(&g_lwc_cs); return TRUE; }
++static LwcSlot* lwc_slot(uint32_t addr)   /* g_lwc_cs held */
++{
++    for (int i = 0; i < LWC_N; i++) if (g_lwc[i].addr == addr) return &g_lwc[i];
++    for (int i = 0; i < LWC_N; i++) if (!g_lwc[i].addr) {
++        g_lwc[i].addr = addr; g_lwc[i].waiters = 0;
++        g_lwc[i].sem = CreateSemaphoreA(NULL, 0, 0x7FFFFFFF, NULL);
++        return &g_lwc[i];
++    }
++    { static int w; if (!w++) fprintf(stderr, "[LWC] slot table FULL (id 0x%08X) -> signals lost\n", addr); }
++    return nullptr;
++}
++static int lwc_poll_mode(void)
++{
++    static int m = -1;
++    if (m < 0) { const char* e = getenv("PS3_LWCOND_POLL"); m = (e && *e == '1') ? 1 : 0; }
++    return m;
++}
++static void lwc_signal(ppu_context* ctx, int all)
++{
++    uint32_t addr = (uint32_t)ctx->gpr[3];
++    ctx->gpr[3] = 0;
++    if (lwc_poll_mode()) return;
++    InitOnceExecuteOnce(&g_lwc_once, lwc_init_cb, NULL, NULL);
++    EnterCriticalSection(&g_lwc_cs);
++    LwcSlot* c = lwc_slot(vm_read32(addr + 0x04));
++    if (getenv("PS3_LWCOND_LOG")) fprintf(stderr, "[LWC] signal%s lwc=0x%08X tid=%llu waiters=%ld lr=0x%08X\n", all ? "_all" : "", addr, (unsigned long long)ctx->thread_id, c ? c->waiters : -1L, (unsigned)ctx->lr);
++    if (c && c->waiters > 0) {
++        long n = all ? c->waiters : 1;
++        c->waiters -= n;
++        ReleaseSemaphore(c->sem, n, NULL);
++    }
++    LeaveCriticalSection(&g_lwc_cs);
++}
++static void sys_lwcond_destroy(ppu_context* ctx)
++{
++    uint32_t addr = (uint32_t)ctx->gpr[3];
++    ctx->gpr[3] = 0;
++    if (lwc_poll_mode()) return;
++    InitOnceExecuteOnce(&g_lwc_once, lwc_init_cb, NULL, NULL);
++    EnterCriticalSection(&g_lwc_cs);
++    uint32_t id = vm_read32(addr + 0x04);
++    for (int i = 0; i < LWC_N; i++)
++        if (g_lwc[i].addr == id && id) {
++            if (g_lwc[i].waiters <= 0) { CloseHandle(g_lwc[i].sem); g_lwc[i].sem = NULL; g_lwc[i].addr = 0; }
++            break;
++        }
++    LeaveCriticalSection(&g_lwc_cs);
++}
++static void sys_lwcond_signal(ppu_context* ctx)     { lwc_signal(ctx, 0); }
++static void sys_lwcond_signal_all(ppu_context* ctx) { lwc_signal(ctx, 1); }
++static void sys_lwcond_signal_to(ppu_context* ctx)  { lwc_signal(ctx, 0); }
++/* wait: r3 = lwcond, r4 = timeout us (0 = infinite). The paired lwmutex is
++ * released while parked and taken again (with its owner/recursion stamps)
++ * before returning. */
++extern "C" uint32_t g_lwc_armed_addr = 0;
++extern "C" void ppu_rwatch_arm(uint32_t, uint32_t); extern "C" void ppu_wwatch_arm(uint32_t);
+ static void sys_lwcond_wait(ppu_context* ctx)
+ {
+     uint32_t lwcond  = (uint32_t)ctx->gpr[3];
++    uint64_t tmo_us  = ctx->gpr[4];
++    { static int armed;
++      if (lwcond >= 0x7FE00000u && lwcond < 0x7FFC0000u && ctx->thread_id == 1 && (uint32_t)ctx->lr == 0x00A4309C && getenv("PS3_LWCOND_ARMRW")) { armed = 1; g_lwc_armed_addr = lwcond; ppu_rwatch_arm(lwcond + 0x18, 0x10); ppu_wwatch_arm(lwcond + 0x18); fprintf(stderr, "[LWC] armed rwatch at 0x%08X\n", lwcond + 0x18); } }
+     uint32_t lwmutex = vm_read32(lwcond + 0x00);
+     struct LwmSlot* sl = lwm_slot(lwmutex);
++    int poll = lwc_poll_mode();
++    LwcSlot* c = nullptr;
++    if (!poll) {
++        InitOnceExecuteOnce(&g_lwc_once, lwc_init_cb, NULL, NULL);
++        EnterCriticalSection(&g_lwc_cs);
++        c = lwc_slot(vm_read32(lwcond + 0x04));
++        if (c) c->waiters++;
++        LeaveCriticalSection(&g_lwc_cs);
++    }
++    if (getenv("PS3_LWCOND_LOG")) fprintf(stderr, "[LWC] wait lwc=0x%08X tid=%llu tmo=%llu lr=0x%08X\n", lwcond, (unsigned long long)ctx->thread_id, (unsigned long long)tmo_us, (unsigned)ctx->lr);
++    uint32_t own = 0, rc = 0;
+     if (sl) {
+-        uint32_t own = vm_read32(lwmutex + LWM_OWNER);
+-        uint32_t rc  = vm_read32(lwmutex + LWM_RECUR);
++        own = vm_read32(lwmutex + LWM_OWNER);
++        rc  = vm_read32(lwmutex + LWM_RECUR);
+         vm_write32(lwmutex + LWM_RECUR, 0);
+         vm_write32(lwmutex + LWM_OWNER, 0);
+-        ppu_thread_note_block(ctx->thread_id);
+         lwm_release(sl);
++    }
++    ppu_thread_note_block(ctx->thread_id);
++    uint64_t rv = 0;
++    if (!c) {
+         Sleep(1);
++    } else {
++        DWORD ms = INFINITE;
++        if (tmo_us) { unsigned long long m = (tmo_us + 999) / 1000; ms = m > 0xFFFFFFFEull ? 0xFFFFFFFEu : (DWORD)m; }
++        if (WaitForSingleObject(c->sem, ms) == WAIT_TIMEOUT) {
++            EnterCriticalSection(&g_lwc_cs);
++            if (c->waiters > 0) { c->waiters--; rv = 0x8001000Bu; }   /* ETIMEDOUT */
++            LeaveCriticalSection(&g_lwc_cs);
++            if (!rv) WaitForSingleObject(c->sem, INFINITE);           /* signal raced the timeout */
++        }
++    }
++    if (sl) {
++        if (getenv("PS3_LWCOND_LOG")) fprintf(stderr, "[LWC] woke lwc=0x%08X tid=%llu relock mtx=0x%08X owner=0x%08X\n", lwcond, (unsigned long long)ctx->thread_id, lwmutex, vm_read32(lwmutex + LWM_OWNER));
+         lwm_acquire(sl, 0);
++        if (getenv("PS3_LWCOND_LOG")) fprintf(stderr, "[LWC] relocked lwc=0x%08X tid=%llu\n", lwcond, (unsigned long long)ctx->thread_id);
+         vm_write32(lwmutex + LWM_OWNER, own);
+         vm_write32(lwmutex + LWM_RECUR, rc ? rc : 1);
+     }
+-    ctx->gpr[3] = 0;
++    ctx->gpr[3] = rv ? (uint64_t)(int64_t)(int32_t)rv : 0;
+ }
+ 
+ /* sys_ppu_thread_get_id(vm::ptr<u64> id) -> *id = calling thread's real id.
+@@ -920,9 +1045,21 @@ static void sys_spinlock_unlock(ppu_context* ctx)
+     _InterlockedExchange(spin_word(ea), 0);
+ }
+ 
++/* cellSpursInitializeWithAttribute2(spurs, attr). The generic import path has
++ * no NID entry for 0x30AA96C4, so GT6's second instance was never initialised.
++ * The C handler takes guest EAs (GUEST_PTR inside cellSpurs.c). */
++static void hle_cellSpursInitializeWithAttribute2(ppu_context* ctx)
++{
++    ctx->gpr[3] = (uint64_t)(int64_t)cellSpursInitializeWithAttribute2(
++        (CellSpurs*)(uintptr_t)(uint32_t)ctx->gpr[3],
++        (const CellSpursAttribute*)(uintptr_t)(uint32_t)ctx->gpr[4]);
++}
++
+ extern "C" void ppu_sysprx_register(void)
+ {
+     ps3_hle_register_ctx(0x15BAE46Bu, "_cellGcmInitBody", hle_cellGcmInitBody);
++    ps3_hle_register_ctx(0x30AA96C4u, "cellSpursInitializeWithAttribute2",
++                         hle_cellSpursInitializeWithAttribute2);
+     ps3_hle_register_ctx(0xEBE5F72Fu, "_sys_spu_image_import", hle_sys_spu_image_import);
+ 
+     /* PS3_NET_ONLINE: real host sockets (libs/network/sysNet.c). Registered
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index f922b745..f6d893ab 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1067,6 +1067,11 @@ int spu_workload_dispatch_job(const uint8_t* image, uint32_t image_size,
+                   }
+               }
+           } }
++        /* SPU_MISS_FAKE_OK=1: diagnostic only. Report the job as completed even
++         * though the image was dropped, so a chain waiting on it can advance.
++         * The SPU-side work did not happen; use this to separate "waiting on a
++         * missing job" from "the renderer is missing a draw". */
++        if (getenv("SPU_MISS_FAKE_OK")) return 1;
+         return 0;
+     }
+     /* Two lines plus two explicit flushes PER JOB. A title running its audio
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index b997931b..5c8623be 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -691,7 +691,7 @@ int64_t sys_ppu_thread_join(ppu_context* ctx)
+ {
+     uint64_t tid          = LV2_ARG_U64(ctx, 0);
+     uint32_t status_addr  = LV2_ARG_PTR(ctx, 1);
+-    { static int n=0; if(PS3_LOG_FIRST(n, 30)) fprintf(stderr,"[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
++    { static int n=0; if(PS3_LOG_FIRST(n, 100000)) fprintf(stderr,"[WAIT] ppu_thread_join(tid=%llu)\n", (unsigned long long)tid); }
+     ppu_thread_note_block(ctx->thread_id);   /* PS3_PRIO_START */
+ 
+     /* Joining yourself is EDEADLK (it used to wait on its own finish event
+diff --git a/tools/ppu_lifter.py b/tools/ppu_lifter.py
+index 464ff41b..2e5f4d5c 100644
+--- a/tools/ppu_lifter.py
++++ b/tools/ppu_lifter.py
+@@ -4405,6 +4405,51 @@ def _const_base_targets(win, rC, read_u32, text_lo, text_hi, bctr_addr):
+     return None
+ 
+ 
++def _fold_constant_reg(win, reg, before_addr, depth=0):
++    """Fold `lis`/`li` + `addi`/`addis`/`ori`/`oris` into the constant in `reg`.
++
++    Scans `win` backward from `before_addr` (exclusive) and stops at the
++    NEAREST instruction that defines `reg`, so a later redefinition cannot
++    mask the value that reaches the use. Returns the 32-bit constant, or None
++    when that nearest definition is not a constant former or the chain does
++    not bottom out in `li`/`lis` (bounded at 8 steps).
++
++    This is how a link-time build materializes an absolute table address:
++    `lis r9,0xA0; addi r9,r9,-0x6CB8` -> 0x009F9348 (GT6 func_009F92CC).
++    The TOC-relative paths do not need it; they start from a load.
++    """
++    if depth > 8:
++        return None
++    for w in reversed([x for x in win if x.addr < before_addr]):
++        a = [x.strip() for x in w.operands.split(',')]
++        # A store READS its first operand; ppu_disasm also names lfs/lfd's FPR
++        # target rN. Neither defines a GPR, so neither ends the search.
++        if not a or a[0] != reg or w.mnemonic.startswith(('st', 'lf')):
++            continue
++        m = w.mnemonic
++        try:
++            if m == 'lis' and len(a) == 2:
++                return (int(a[1], 0) & 0xFFFF) << 16
++            if m == 'li' and len(a) == 2:
++                return int(a[1], 0) & 0xFFFFFFFF
++            if m == 'addi' and len(a) == 3 and a[1] == reg:
++                base = _fold_constant_reg(win, reg, w.addr, depth + 1)
++                return None if base is None else (base + int(a[2], 0)) & 0xFFFFFFFF
++            if m == 'addis' and len(a) == 3 and a[1] == reg:
++                base = _fold_constant_reg(win, reg, w.addr, depth + 1)
++                return None if base is None else (base + (int(a[2], 0) << 16)) & 0xFFFFFFFF
++            if m in ('ori', 'oris') and len(a) == 3 and a[1] == reg:
++                base = _fold_constant_reg(win, reg, w.addr, depth + 1)
++                if base is None:
++                    return None
++                v = int(a[2], 0) & 0xFFFF
++                return (base | (v << 16)) if m == 'oris' else (base | v)
++        except ValueError:
++            return None
++        return None                     # nearest def is not a constant former
++    return None
++
++
+ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts=None):
+     """Find `mtctr rX; bctr` switch dispatchers and read their jump tables.
+ 
+@@ -4601,7 +4646,12 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+         # `add` preference still decides whenever the scores cannot, and a
+         # dispatcher only changes when the old pick validated strictly fewer
+         # targets.
+-        _bases = []         # [(r_base, disp, base_is_ld, disp2, disp2_is_ld)]
++        _bases = []         # [(r_base, disp, base_is_ld, disp2, disp2_is_ld, abs_base)]
++                            # abs_base is a link-time constant base (GT6
++                            # func_009F92CC: `lis r9,0xA0; addi r9,r9,-0x6CB8`
++                            # -> 0x009F9348). It needs no TOC indirection; see
++                            # _fold_constant_reg. Exactly one of disp/abs_base
++                            # is set for a resolved entry.
+         # Prefer the lwzx operand that the `add ..., base` feeding mtctr combines
+         # with the loaded offset. Both operands are often TOC-loaded, so "first
+         # candidate with a TOC-load definition" can pick an unrelated index reg
+@@ -4632,6 +4682,7 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+         for cand in _cands:
+             disp = None; r_base = None; base_is_ld = False
+             disp2 = None; disp2_is_ld = False
++            abs_base = None
+             # Walk backward to the NEAREST instruction that defines `cand`, and
+             # accept it as the table base only if that definition is a TOC load
+             # (`lwz`/`ld cand, disp(r2)`). Stopping at the first definition is
+@@ -4730,16 +4781,35 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+                         if _resolved or _pass:
+                             break
+                         _scan = _live(_scan_lo(i), i)
++                elif w.mnemonic in ('lis', 'li', 'addi', 'addis', 'ori', 'oris'):
++                    # ABSOLUTE base: the table address is a link-time constant,
++                    # not a TOC slot. GT6 func_009F92CC (`lis r9,0xA0; addi
++                    # r9,r9,-0x6CB8` -> 0x009F9348) was dropped here: the
++                    # TOC-only resolver left _bases empty, the bctr lifted to
++                    # `ps3_indirect_call(ctx); return;`, and 0x9F9380 (a
++                    # mid-function case start, absent from the function table)
++                    # never ran -- the FileDevice request/completion pump spun.
++                    # Only accept a constant that lands INSIDE the code window
++                    # and is word-aligned: every real switch table this pass
++                    # can lift is in .text (gcc puts it immediately before the
++                    # cases), so a constant pointing at .data/.rodata is far
++                    # more likely to be an unrelated pointer table than a
++                    # jump table. It also keeps a stray `lis/addi` pair from
++                    # being read as a table from unmapped/ELF-header bytes.
++                    v = _fold_constant_reg(win_cand, cand, lwzx.addr)
++                    if v is not None and text_lo <= v < text_hi and (v & 3) == 0:
++                        r_base = cand
++                        abs_base = v
+                 break                           # first definition of cand wins/loses
+-            if disp is not None:
+-                _bases.append((r_base, disp, base_is_ld, disp2, disp2_is_ld))
++            if disp is not None or abs_base is not None:
++                _bases.append((r_base, disp, base_is_ld, disp2, disp2_is_ld, abs_base))
+         _dbg(all_insns[i].addr, f"bases={_bases} toc={toc}")
+-        if not _bases or not toc:
++        if not _bases:
+             continue
+         toc_candidates = toc if isinstance(toc, (list, tuple)) else [toc]
+         best = []
+         best_key = (0, 0)
+-        for r_base, disp, base_is_ld, disp2, disp2_is_ld in _bases:
++        for r_base, disp, base_is_ld, disp2, disp2_is_ld, abs_base in _bases:
+             # offset table iff an `add rC, *, r_base` combines the loaded value + base
+             is_offset = any(
+                 w.mnemonic == 'add' and
+@@ -4821,22 +4891,32 @@ def discover_jump_tables(all_insns, read_u32, toc, text_lo, text_hi, func_starts
+             # with. We don't track per-function TOCs here, so try each candidate
+             # and keep the one whose table decodes to the most in-text case
+             # targets (a wrong TOC reads unrelated data and validates 0 targets).
+-            for cand in toc_candidates:
+-                if not cand:
+-                    continue
+-                def _read_ptr(_ea, _is_ld):
+-                    # ELFv1 TOC entries are 64-bit; a table address always fits the
+-                    # low word, so a non-zero high word means we read the wrong slot.
+-                    _ea &= 0xFFFFFFFF
+-                    if not _is_ld:
+-                        return read_u32(_ea)
+-                    if read_u32(_ea):
+-                        return None
+-                    return read_u32((_ea + 4) & 0xFFFFFFFF)
+-                table_base = _read_ptr(cand + disp, base_is_ld)
+-                if table_base is not None and disp2 is not None:
+-                    table_base = _read_ptr(table_base + disp2, disp2_is_ld)
+-                _dbg(all_insns[i].addr, f"r_base={r_base} cand_toc=0x{cand:X} table_base={None if table_base is None else hex(table_base)} count={count} is_offset={is_offset} text=[0x{text_lo:X},0x{text_hi:X})")
++            def _read_ptr(_ea, _is_ld):
++                # ELFv1 TOC entries are 64-bit; a table address always fits the
++                # low word, so a non-zero high word means we read the wrong slot.
++                _ea &= 0xFFFFFFFF
++                if not _is_ld:
++                    return read_u32(_ea)
++                if read_u32(_ea):
++                    return None
++                return read_u32((_ea + 4) & 0xFFFFFFFF)
++            # An ABSOLUTE base is already the table address (the constant
++            # built by lis/addi); there is no TOC slot to read. Otherwise
++            # resolve through each TOC candidate as before.
++            if abs_base is not None:
++                base_candidates = [abs_base]
++            else:
++                base_candidates = [c for c in toc_candidates if c]
++            for cand in base_candidates:
++                if abs_base is not None:
++                    table_base = abs_base
++                else:
++                    table_base = _read_ptr(cand + disp, base_is_ld)
++                    if table_base is not None and disp2 is not None:
++                        table_base = _read_ptr(table_base + disp2, disp2_is_ld)
++                _where = (f"abs=0x{abs_base:X}" if abs_base is not None
++                          else f"cand_toc=0x{cand:X}")
++                _dbg(all_insns[i].addr, f"r_base={r_base} {_where} table_base={None if table_base is None else hex(table_base)} count={count} is_offset={is_offset} text=[0x{text_lo:X},0x{text_hi:X})")
+                 if table_base is None:
+                     continue
+                 targets = []
+@@ -5064,6 +5144,13 @@ def main() -> None:
+                              "is emitted as `if (guard) {new} else {orig}`, guard "
+                              "being an int the port defines. The input must hold "
+                              "`orig` at `addr` or the lift stops.")
++    parser.add_argument("--dump-jump-tables", action="store_true",
++                        help="Print every discovered computed-bctr dispatcher and "
++                             "its case targets, then stop before lifting. Useful "
++                             "to verify an absolute-base table (e.g. GT6 "
++                             "func_009F92CC -> 0x009F9348) without rewriting "
++                             "generated sources. Combine with JT_DEBUG=<addr> for "
++                             "the per-candidate base/decode trace.")
+     args = parser.parse_args()
+ 
+     # Load firmware-import stubs (addr -> NID) up front; applied to func_bounds
+@@ -5464,6 +5551,15 @@ def main() -> None:
+         except Exception as exc:
+             print(f"  jump-table discovery skipped: {exc}", file=sys.stderr)
+ 
++    if args.dump_jump_tables:
++        for _disp in sorted(jt_dispatchers):
++            _cases = jt_dispatchers[_disp]
++            print(f"  0x{_disp:08X}: {len(_cases)} case(s): " +
++                  " ".join(f"0x{t:08X}" for t in _cases))
++        print(f"  {len(jt_dispatchers)} dispatcher(s), "
++              f"{len(jt_targets)} case target(s)")
++        return
++
+     # ----- fall-through gap repair -----------------------------------------
+     # IDA exports sometimes TRUNCATE a function: its declared end lands mid-body
+     # on a non-terminator (LBP: malloc wrapper 0x5E7808 exported as ending at
+diff --git a/tools/test_ppu_jumptables.py b/tools/test_ppu_jumptables.py
+index 64ed2451..685b2d02 100644
+--- a/tools/test_ppu_jumptables.py
++++ b/tools/test_ppu_jumptables.py
+@@ -61,14 +61,20 @@ def w_mtctr(rs):
+     return (31 << 26) | (rs << 21) | (spr << 11) | (467 << 1)
+ 
+ 
+-def decode_all(words):
+-    return [ppu_disasm.decode(w, TEXT_LO + 4 * i) for i, w in enumerate(words)]
+-
+-
+-def discover(words, mem):
+-    insns = decode_all(words)
++def w_ori(ra, rs, ui):     return (24 << 26) | (rs << 21) | (ra << 16) | (ui & 0xFFFF)
++def w_addi(rt, ra, si):    return (14 << 26) | (rt << 21) | (ra << 16) | (si & 0xFFFF)
++def w_lis(rt, si):         return (15 << 26) | (rt << 21) | (0 << 16) | (si & 0xFFFF)
++def w_extsw(ra, rs):       return (31 << 26) | (rs << 21) | (ra << 16) | (986 << 1)
++
++
++def decode_all(words, base=TEXT_LO):
++    return [ppu_disasm.decode(w, base + 4 * i) for i, w in enumerate(words)]
++
++
++def discover(words, mem, toc=TOC, text_lo=TEXT_LO, text_hi=TEXT_HI, base=TEXT_LO):
++    insns = decode_all(words, base)
+     tables = discover_jump_tables(insns, lambda a: mem.get(a & 0xFFFFFFFF),
+-                                  [TOC], TEXT_LO, TEXT_HI)
++                                  [toc], text_lo, text_hi)
+     return tables.get(insns[-1].addr)                # the bctr is always last
+ 
+ 
+@@ -324,9 +330,6 @@ def test_multi_toc_prefers_targets_near_the_dispatcher():
+           tables.get(insns[-1].addr), [0x11100, 0x11200])
+ 
+ 
+-def w_ori(ra, rs, ui):     return (24 << 26) | (rs << 21) | (ra << 16) | (ui & 0xFFFF)
+-
+-
+ def test_bound_compare_beyond_window():
+     """The bounds compare sits more than 30 instructions before the bctr.
+ 
+@@ -356,6 +359,97 @@ def test_bound_compare_beyond_window():
+           [first + 4 * k for k in range(n)])
+ 
+ 
++def test_absolute_base_from_lis_addi():
++    """GT6 func_009F92CC: a link-time constant table base, no TOC slot.
++
++        009F9320: cmplwi cr7, r0, 0xD
++        009F9328: lis    r9, 0xA0
++        009F932C: rldic  r11, r0, 2, 0x1E
++        009F9330: addi   r9, r9, -0x6CB8    <- r9 = 0x009F9348
++        009F9334: lwzx   r0, r11, r9
++        009F9338: extsw  r0, r0
++        009F933C: add    r0, r0, r9
++        009F9340: mtctr  r0 ; bctr
++
++    The base never passes through r2, so the TOC-relative resolver left
++    `_bases` empty and the bctr lifted to `ps3_indirect_call(ctx); return;`.
++    0x9F9380 is a mid-function case start, not in the function table, so the
++    call did nothing and the FileDevice state machine never advanced.
++
++    Table at 0x009F9348 (offsets from the base), as decoded from the ELF:
++    14 slots, 10 distinct case addresses. The owner's temporary workaround
++    adds exactly those 10 as explicit function starts; the run must produce
++    the same set.
++    """
++    gt6_base = 0x9F9348
++    gt6_offsets = [0x38, 0x38, 0x88, 0x88, 0xA4, 0xE0, 0xFC, 0x118,
++                   0x134, 0x134, 0x150, 0x150, 0x188, 0x16C]
++    raw_targets = [(gt6_base + o) & 0xFFFFFFFF for o in gt6_offsets]
++    # The fixture is the real table: 14 slots, duplicates included.
++    check("GT6 0x9F9348 raw table decode", raw_targets,
++          [0x9F9380, 0x9F9380, 0x9F93D0, 0x9F93D0, 0x9F93EC, 0x9F9428,
++           0x9F9444, 0x9F9460, 0x9F947C, 0x9F947C, 0x9F9498, 0x9F9498,
++           0x9F94D0, 0x9F94B4])
++    mem = {gt6_base + 4 * k: v for k, v in enumerate(gt6_offsets)}
++    got = discover([w_cmplwi(7, 0, 0xD), w_lis(9, 0xA0), w_slwi(11, 0, 2),
++                    w_addi(9, 9, -0x6CB8), w_lwzx(0, 11, 9), w_extsw(0, 0),
++                    w_add(0, 0, 9), w_mtctr(0), w_bctr()],
++                   mem, text_lo=0x9F0000, text_hi=0x9FA000, base=0x9F92CC)
++    check("absolute base from lis+addi (GT6 func_009F92CC)", got,
++          [0x9F9380, 0x9F93D0, 0x9F93EC, 0x9F9428, 0x9F9444,
++           0x9F9460, 0x9F947C, 0x9F9498, 0x9F94B4, 0x9F94D0])
++
++
++def test_absolute_base_from_lis_ori():
++    """Same shape with `lis`+`ori` (the other constant former gcc emits).
++
++        cmplwi cr0, r3, 2 ; lis r11,1 ; ori r11,r11,0x1000  -> 0x11000
++        slwi r9,r3,2 ; lwzx r0,r9,r11 ; add r0,r0,r11 ; mtctr r0 ; bctr
++    """
++    table = 0x11000
++    mem = {table + 0: 0x100, table + 4: 0x200, table + 8: 0xFFFFFFFF}
++    got = discover([w_cmplwi(0, 3, 2), w_lis(11, 1), w_ori(11, 11, 0x1000),
++                    w_slwi(9, 3, 2), w_lwzx(0, 9, 11), w_add(0, 0, 11),
++                    w_mtctr(0), w_bctr()], mem)
++    check("absolute base from lis+ori", got, [0x11100, 0x11200])
++
++
++def test_absolute_base_nearest_def_wins():
++    """A later load of the same register must hide the earlier constant.
++
++        lis r9,0xA0 ; addi r9,r9,-0x6CB8 ; lwz r9,16(r2)   <- real base
++        slwi r10,r3,2 ; lwzx r0,r10,r9 ; add r0,r0,r9 ; mtctr r0 ; bctr
++
++    Taking the constant would read 0x9F9348, which is not a table in this
++    fixture, and drop a dispatcher the TOC path already handled.
++    """
++    table = 0x11000
++    mem = {TOC + 16: table, 0x9F9348: 0x38, 0x9F934C: 0x38,
++           table + 0: 0x100, table + 4: 0x200, table + 8: 0xFFFFFFFF}
++    got = discover([w_cmplwi(0, 3, 2), w_lis(9, 0xA0), w_addi(9, 9, -0x6CB8),
++                    w_lwz(9, 2, 16), w_slwi(10, 3, 2), w_lwzx(0, 10, 9),
++                    w_add(0, 0, 9), w_mtctr(0), w_bctr()], mem)
++    check("nearest definition wins over an earlier constant", got,
++          [0x11100, 0x11200])
++
++
++def test_absolute_base_outside_text_rejected():
++    """A constant base below .text is data, not a switch table.
++
++        lis r9,8 ; addi r9,r9,0  -> 0x8000 (below TEXT_LO)
++        entries would decode to 0x13000/0x14000, inside .text.
++
++    Accepting it would manufacture a switch out of unrelated data; the
++    in-text guard on the base prevents that.
++    """
++    base = 0x8000
++    mem = {base + 0: 0xB000, base + 4: 0xC000, base + 8: 0xFFFFFFFF}
++    got = discover([w_cmplwi(0, 3, 2), w_lis(9, 8), w_addi(9, 9, 0),
++                    w_slwi(10, 3, 2), w_lwzx(0, 10, 9), w_add(0, 0, 9),
++                    w_mtctr(0), w_bctr()], mem)
++    check("absolute base outside .text is rejected", got, None)
++
++
+ def main() -> int:
+     test_encodings()
+     test_absolute_base_is_second_operand()
+@@ -368,6 +462,10 @@ def main() -> int:
+     test_base_before_fallthrough_split()
+     test_const_base_no_table()
+     test_const_base_needs_constant()
++    test_absolute_base_from_lis_addi()
++    test_absolute_base_from_lis_ori()
++    test_absolute_base_nearest_def_wins()
++    test_absolute_base_outside_text_rejected()
+     test_multi_toc_prefers_targets_near_the_dispatcher()
+     test_bound_compare_beyond_window()
+     test_spilled_base_reused_as_target()

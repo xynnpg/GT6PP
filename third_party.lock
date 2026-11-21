@@ -1,0 +1,3 @@
+# Pinned third-party base. scripts/setup-third-party.ps1 reads this file.
+# name=repo|tag|commit|patch (patch is applied on top of commit, in order)
+ps3recomp|https://github.com/sp00nznet/ps3recomp.git|v0.19.0|ae92407bb1d899e3d32143e360fe6e6d4d8fa1b5|patches/ps3recomp-v0.19.0-gt6-eu-all.patch
